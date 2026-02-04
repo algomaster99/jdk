@@ -68,6 +68,7 @@
 #include "prims/methodHandles.hpp"
 #include "runtime/arguments.hpp"
 #include "runtime/atomicAccess.hpp"
+#include "runtime/globals_extension.hpp"
 #include "runtime/handles.inline.hpp"
 #include "runtime/java.hpp"
 #include "runtime/javaCalls.hpp"
@@ -1298,6 +1299,12 @@ InstanceKlass* SystemDictionary::load_instance_class_impl(Symbol* class_name, Ha
 #endif
 
     if (k == nullptr) {
+      // If AOTCache is specified and we're not dumping, require all classes to be in cache
+      if (!CDSConfig::is_dumping_archive() && !FLAG_IS_DEFAULT(AOTCache)) {
+        ResourceMark rm(THREAD);
+        const char* class_name_str = class_name->as_C_string();
+        printf("not cached: %s\n", class_name_str);
+      }
       // Use VM class loader
       PerfTraceTime vmtimer(ClassLoader::perf_sys_classload_time());
       k = ClassLoader::load_class(class_name, pkg_entry, search_only_bootloader_append, CHECK_NULL);
