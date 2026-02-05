@@ -448,6 +448,9 @@ void AOTClassLocationConfig::dumptime_init(JavaThread* current) {
     java_lang_Throwable::print(current->pending_exception(), tty);
     vm_exit_during_initialization("AOTClassLocationConfig::dumptime_init_helper() failed unexpectedly");
   }
+  if (CDSConfig::is_dumping_final_static_archive()) {
+    dumptime_update_max_used_index(runtime()->_max_used_index);
+  }
 }
 
 void AOTClassLocationConfig::dumptime_init_helper(TRAPS) {
