@@ -125,6 +125,11 @@
           "Specifies the file name for writing the AOT cache")              \
           constraint(AOTCacheOutputConstraintFunc, AtParse)                 \
                                                                             \
+  product(bool, AOTMerge, false, EXPERIMENTAL,                              \
+          "When using an AOT cache at runtime, request creation of a new "  \
+          "AOT cache at VM shutdown that merges the current cache contents "\
+          "with classes actually loaded in this run")                       \
+                                                                            \
   product(bool, AOTInvokeDynamicLinking, false, DIAGNOSTIC,                 \
           "AOT-link JVM_CONSTANT_InvokeDynamic entries in cached "          \
           "ConstantPools")                                                  \

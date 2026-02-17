@@ -422,6 +422,7 @@ void CDSConfig::check_aot_flags() {
   CHECK_NEW_FLAG(AOTCacheOutput);
   CHECK_NEW_FLAG(AOTConfiguration);
   CHECK_NEW_FLAG(AOTMode);
+  CHECK_NEW_FLAG(AOTMerge);
 
   CHECK_SINGLE_PATH(AOTCache);
   CHECK_SINGLE_PATH(AOTCacheOutput);
@@ -438,6 +439,7 @@ void CDSConfig::check_aot_flags() {
   bool has_cache_output = !FLAG_IS_DEFAULT(AOTCacheOutput);
   bool has_config = !FLAG_IS_DEFAULT(AOTConfiguration);
   bool has_mode = !FLAG_IS_DEFAULT(AOTMode);
+  bool has_merge = AOTMerge;
 
   if (!has_cache && !has_cache_output && !has_config && !has_mode) {
     // AOT flags are not used. Use classic CDS workflow
@@ -446,6 +448,16 @@ void CDSConfig::check_aot_flags() {
 
   if (has_cache && has_cache_output) {
     vm_exit_during_initialization("Only one of AOTCache or AOTCacheOutput can be specified");
+  }
+
+  if (has_merge) {
+    if (!has_cache) {
+      vm_exit_during_initialization("-XX:AOTMerge requires -XX:AOTCache to be specified");
+    }
+    if (!FLAG_IS_DEFAULT(AOTMode) &&
+        (strcmp(AOTMode, "record") == 0 || strcmp(AOTMode, "create") == 0)) {
+      vm_exit_during_initialization("-XX:AOTMerge is only supported with AOTMode=auto or on");
+    }
   }
 
   if (!has_cache && (!has_mode || strcmp(AOTMode, "auto") == 0)) {

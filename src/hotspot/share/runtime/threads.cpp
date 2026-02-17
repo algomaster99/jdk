@@ -992,6 +992,11 @@ void Threads::destroy_vm() {
   // run Java level shutdown hooks
   thread->invoke_shutdown_hooks();
 
+  // Experimental: optionally perform AOT cache merge at VM shutdown.
+  // The current implementation only logs that the hook was reached; the
+  // actual merge logic will be implemented in AOTMetaspace.
+  AOTMetaspace::maybe_merge_aot_cache_at_exit();
+
   before_exit(thread);
 
   thread->exit(true);
