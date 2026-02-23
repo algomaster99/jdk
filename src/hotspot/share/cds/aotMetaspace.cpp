@@ -1211,36 +1211,6 @@ void AOTMetaspace::dump_static_archive_impl(StaticArchiveBuilder& builder, TRAPS
   }
 }
 
-// Experimental hook for -XX:AOTMerge.
-// When enabled, this is intended to be called at VM shutdown to produce
-// a new AOT cache that reflects both the contents of the currently used
-// cache and the set of classes actually loaded in this run.
-//
-// The full "merge" behavior is non-trivial (it must respect all existing
-// CDS/AOT invariants and configuration checks). For now, this hook is a
-// placeholder so that the JVM flag plumbing is in place; it can be
-// extended in follow-up work to perform the actual merge.
-void AOTMetaspace::maybe_merge_aot_cache_at_exit() {
-  if (!CDSConfig::is_using_archive()) {
-    return;
-  }
-  if (!AOTMerge) {
-    return;
-  }
-
-  // At this point we know:
-  //  - CDS/AOT cache was in use for this run.
-  //  - The user requested -XX:AOTMerge together with -XX:AOTCache.
-  //
-  // Implementing a real merge requires substantial additional logic:
-  //  - enumerating classes from the existing cache and the current run,
-  //  - reconciling loader/module graph and JVMTI constraints,
-  //  - and safely writing a new archive file.
-  //
-  // For now we just log that the hook was reached so users can verify
-  // that the flag is being recognized.
-  log_info(aot)("AOTMerge requested at VM shutdown, but merge logic is not yet implemented");
-}
 
 bool AOTMetaspace::write_static_archive(ArchiveBuilder* builder,
                                         FileMapInfo* map_info,
