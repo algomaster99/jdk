@@ -45,6 +45,7 @@ class CDSConfig : public AllStatic {
   static bool _is_single_command_training;
   static bool _has_temp_aot_config_file;
   static bool _is_at_aot_safepoint;
+  static bool _is_merging_aot_cache;
 
   const static char* _default_archive_path;
   const static char* _input_static_archive_path;
@@ -71,6 +72,7 @@ class CDSConfig : public AllStatic {
   static void check_aotmode_auto_or_on();
   static void check_aotmode_record();
   static void check_aotmode_create();
+  static void check_aotmode_merge();
   static void setup_compiler_args();
   static void check_unsupported_dumping_module_options();
 
@@ -203,6 +205,9 @@ public:
   static void disable_dumping_aot_code()                     NOT_CDS_RETURN;
   static void enable_dumping_aot_code()                      NOT_CDS_RETURN;
   static bool is_dumping_adapters()                          NOT_CDS_RETURN_(false);
+
+  // --- AOT cache merging at runtime
+  static bool is_merging_aot_cache()                         { return CDS_ONLY(_is_merging_aot_cache) NOT_CDS(false); }
 
   // Some CDS functions assume that they are called only within a single-threaded context. I.e.,
   // they are called from:

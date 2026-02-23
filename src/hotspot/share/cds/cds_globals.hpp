@@ -106,9 +106,10 @@
   /* The following 3 flags are aliases of -Xshare:dump,                 */  \
   /* -XX:SharedArchiveFile=..., etc. See CDSConfig::check_flag_aliases()*/  \
                                                                             \
+  /* TODO: Should possible mark merge mode as experimental */               \
   product(ccstr, AOTMode, nullptr,                                          \
           "Specifies how AOTCache should be created or used. Valid values " \
-          "are: off, record, create, auto, on; the default is auto")        \
+          "are: off, record, create, auto, on, merge; the default is auto") \
           constraint(AOTModeConstraintFunc, AtParse)                        \
                                                                             \
   product(ccstr, AOTConfiguration, nullptr,                                 \
@@ -124,11 +125,6 @@
   product(ccstr, AOTCacheOutput, nullptr,                                   \
           "Specifies the file name for writing the AOT cache")              \
           constraint(AOTCacheOutputConstraintFunc, AtParse)                 \
-                                                                            \
-  product(bool, AOTMerge, false, EXPERIMENTAL,                              \
-          "When using an AOT cache at runtime, request creation of a new "  \
-          "AOT cache at VM shutdown that merges the current cache contents "\
-          "with classes actually loaded in this run")                       \
                                                                             \
   product(bool, AOTInvokeDynamicLinking, false, DIAGNOSTIC,                 \
           "AOT-link JVM_CONSTANT_InvokeDynamic entries in cached "          \

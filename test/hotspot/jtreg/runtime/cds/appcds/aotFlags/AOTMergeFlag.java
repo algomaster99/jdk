@@ -1,6 +1,6 @@
 /*
  * @test
- * @summary Test that the AOTMerge boolean flag is recognized and that it requires an AOT cache to be specified.
+ * @summary Test that AOTMode=merge is accepted and requires AOTCache to be specified.
  * @library /test/lib
  * @run driver AOTMergeFlag
  */
@@ -14,47 +14,30 @@ import jdk.test.lib.process.ProcessTools;
 public class AOTMergeFlag {
 
     public static void main(String[] args) throws Exception {
-        testFlag("-XX:+AOTMerge");
-        testFlag("-XX:-AOTMerge");
-        testMergeWithoutAOTCacheFails();
-        testMergeWithModeFails();
+        testMergeWithCache();
+        testMergeWithoutCacheFails();
     }
 
-    private static void testFlag(String flag) throws Exception {
+    private static void testMergeWithCache() throws Exception {
         ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
-            "-Xlog:aot=info",
-                "-XX:+UnlockExperimentalVMOptions",
+                "-Xlog:aot=info",
+                "-XX:AOTMode=merge",
                 "-XX:AOTCache=dummy.aot",
-                flag,
                 "-version");
 
-        OutputAnalyzer out = CDSTestUtils.executeAndLog(pb, "aot-merge-flag");
-        out.shouldNotContain("Unrecognized VM option 'AOTMerge'");
+        OutputAnalyzer out = CDSTestUtils.executeAndLog(pb, "aot-merge-with-cache");
+        out.shouldContain("AOT cache merge enabled with AOTCache=dummy.aot");
         out.shouldHaveExitValue(0);
     }
 
-    private static void testMergeWithoutAOTCacheFails() throws Exception {
+    private static void testMergeWithoutCacheFails() throws Exception {
         ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
                 "-Xlog:aot=info",
-                "-XX:+UnlockExperimentalVMOptions",
-                "-XX:+AOTMerge",
+                "-XX:AOTMode=merge",
                 "-version");
 
         OutputAnalyzer out = CDSTestUtils.executeAndLog(pb, "aot-merge-no-cache");
-        out.shouldContain("-XX:+AOTMerge requires -XX:AOTCache to be specified");
-        out.shouldNotHaveExitValue(0);
-    }
-
-    private static void testMergeWithModeFails() throws Exception {
-        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
-                "-XX:+UnlockExperimentalVMOptions",
-                "-XX:AOTCache=dummy.aot",
-                "-XX:+AOTMerge",
-                "-XX:AOTMode=create",
-                "-version");
-
-        OutputAnalyzer out = CDSTestUtils.executeAndLog(pb, "aot-merge-with-mode");
-        out.shouldContain("-XX:+AOTMerge cannot be used with -XX:AOTMode");
+        out.shouldContain("-XX:AOTMode=merge requires -XX:AOTCache to be specified");
         out.shouldNotHaveExitValue(0);
     }
 }
