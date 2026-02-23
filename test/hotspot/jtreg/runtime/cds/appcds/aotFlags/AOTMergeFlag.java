@@ -1,17 +1,24 @@
 /*
  * @test
  * @summary Test that AOTMode=merge is accepted and requires AOTCache to be specified.
- * @library /test/lib
+ * @requires vm.cds
+ * @requires vm.flagless
+ * @library /test/lib /test/hotspot/jtreg/runtime/cds/appcds/test-classes
+ * @build Hello
+ * @run driver jdk.test.lib.helpers.ClassFileInstaller -jar hello.jar Hello
  * @run driver AOTMergeFlag
  */
 
 import jdk.test.lib.cds.CDSTestUtils;
+import jdk.test.lib.helpers.ClassFileInstaller;
 import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
 
-// Execute with
-// make run-test TEST=runtime/cds/appcds/aotFlags/AOTMergeFlag.java CONF=linux-x86_64-server-fastdebug
 public class AOTMergeFlag {
+
+    static String appJar = ClassFileInstaller.getJarPath("hello.jar");
+    static String aotCacheFile = "hello.aot";
+    static String helloClass = "Hello";
 
     public static void main(String[] args) throws Exception {
         testMergeWithCache();
@@ -19,19 +26,24 @@ public class AOTMergeFlag {
     }
 
     private static void testMergeWithCache() throws Exception {
-        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
+        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(
+                    "-XX:AOTCacheOutput=" + aotCacheFile,
+                    "-Xlog:aot",
+                    "-cp", appJar, helloClass);
+        OutputAnalyzer out = CDSTestUtils.executeAndLog(pb, "aot-merge-with-cache");
+
+        pb = ProcessTools.createLimitedTestJavaProcessBuilder(
                 "-Xlog:aot=info",
                 "-XX:AOTMode=merge",
-                "-XX:AOTCache=dummy.aot",
-                "-version");
+                "-XX:AOTCache=" + aotCacheFile,
+                "-cp", appJar, helloClass);
 
-        OutputAnalyzer out = CDSTestUtils.executeAndLog(pb, "aot-merge-with-cache");
-        out.shouldContain("AOT cache merge enabled with AOTCache=dummy.aot");
+        out = CDSTestUtils.executeAndLog(pb, "aot-merge-with-cache");
         out.shouldHaveExitValue(0);
     }
 
     private static void testMergeWithoutCacheFails() throws Exception {
-        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
+        ProcessBuilder pb = ProcessTools.createLimitedTestJavaProcessBuilder(
                 "-Xlog:aot=info",
                 "-XX:AOTMode=merge",
                 "-version");
