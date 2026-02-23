@@ -2,7 +2,7 @@
  * @test
  * @summary Test that the AOTMerge boolean flag is recognized and that it requires an AOT cache to be specified.
  * @library /test/lib
- * @run driver AOTMergeBooleanFlag
+ * @run driver AOTMergeFlag
  */
 
 import jdk.test.lib.cds.CDSTestUtils;
@@ -10,8 +10,8 @@ import jdk.test.lib.process.OutputAnalyzer;
 import jdk.test.lib.process.ProcessTools;
 
 // Execute with
-// make run-test TEST=runtime/cds/appcds/aotFlags/AOTMergeBooleanFlag.java CONF=linux-x86_64-server-fastdebug
-public class AOTMergeBooleanFlag {
+// make run-test TEST=runtime/cds/appcds/aotFlags/AOTMergeFlag.java CONF=linux-x86_64-server-fastdebug
+public class AOTMergeFlag {
 
     public static void main(String[] args) throws Exception {
         testFlag("-XX:+AOTMerge");
