@@ -56,6 +56,7 @@ bool CDSConfig::_old_cds_flags_used = false;
 bool CDSConfig::_new_aot_flags_used = false;
 bool CDSConfig::_disable_heap_dumping = false;
 bool CDSConfig::_is_at_aot_safepoint = false;
+bool CDSConfig::_is_merging_aot_cache = false;
 
 const char* CDSConfig::_default_archive_path = nullptr;
 const char* CDSConfig::_input_static_archive_path = nullptr;
@@ -453,6 +454,11 @@ void CDSConfig::check_aot_flags() {
   if (has_merge) {
     if (!has_cache) {
       vm_exit_during_initialization("-XX:+AOTMerge requires -XX:AOTCache to be specified");
+    }
+    if (has_mode) {
+      // We will configure mode on our own.
+      // Throwing an error just to ensure that we don't have to handle the complexity of modes.
+      vm_exit_during_initialization("-XX:+AOTMerge cannot be used with -XX:AOTMode");
     }
   }
 

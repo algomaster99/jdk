@@ -17,6 +17,7 @@ public class AOTMergeBooleanFlag {
         testFlag("-XX:+AOTMerge");
         testFlag("-XX:-AOTMerge");
         testMergeWithoutAOTCacheFails();
+        testMergeWithModeFails();
     }
 
     private static void testFlag(String flag) throws Exception {
@@ -41,6 +42,19 @@ public class AOTMergeBooleanFlag {
 
         OutputAnalyzer out = CDSTestUtils.executeAndLog(pb, "aot-merge-no-cache");
         out.shouldContain("-XX:+AOTMerge requires -XX:AOTCache to be specified");
+        out.shouldNotHaveExitValue(0);
+    }
+
+    private static void testMergeWithModeFails() throws Exception {
+        ProcessBuilder pb = ProcessTools.createTestJavaProcessBuilder(
+                "-XX:+UnlockExperimentalVMOptions",
+                "-XX:AOTCache=dummy.aot",
+                "-XX:+AOTMerge",
+                "-XX:AOTMode=create",
+                "-version");
+
+        OutputAnalyzer out = CDSTestUtils.executeAndLog(pb, "aot-merge-with-mode");
+        out.shouldContain("-XX:+AOTMerge cannot be used with -XX:AOTMode");
         out.shouldNotHaveExitValue(0);
     }
 }
