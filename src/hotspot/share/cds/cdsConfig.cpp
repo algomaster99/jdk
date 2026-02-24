@@ -83,6 +83,7 @@ void CDSConfig::ergo_initialize() {
   if (is_merging_aot_cache()) {
     assert(RequireSharedSpaces, "merging AOT cache requires archive passed via -XX:AOTCache");
     assert(UseSharedSpaces, "we must use AOTCache since we want to merge it");
+    log_info(aot,merge)("Sanity check in ergo_initalized pass");
   }
 
   if (is_dumping_static_archive() && !is_dumping_final_static_archive()) {
@@ -512,7 +513,7 @@ void CDSConfig::check_aotmode_merge() {
   // Fail if the AOTCache cannot be used
   RequireSharedSpaces = true;
 
-  log_info(aot)("AOT cache merge enabled with AOTCache=%s", AOTCache);
+  log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s", AOTCache);
   // TODO: AOTCacheOutput should provide the name of the new AOTCache (combined one)
 }
 
@@ -1097,23 +1098,23 @@ void CDSConfig::start_merging_aot_cache() {
   }
 
   const char* cache_path = input_static_archive_path();
-  log_info(aot)("Starting AOT cache merge with input cache: %s", cache_path);
+  log_info(aot, merge)("Starting AOT cache merge with input cache: %s", cache_path);
 
   FileMapInfo* mapinfo = FileMapInfo::current_info();
   if (mapinfo == nullptr) {
-    log_error(aot)("Cannot merge: AOT cache was not loaded at startup");
+    log_error(aot, merge)("Cannot merge: AOT cache was not loaded at startup");
     return;
   }
 
   FileMapHeader* header = mapinfo->header();
-  log_info(aot)("AOT cache header: version %d, has_aot_linked_classes=%d, has_platform_or_app_classes=%d",
-                header->version(),
-                header->has_aot_linked_classes(),
-                header->has_platform_or_app_classes());
+  log_info(aot, merge)("AOT cache header: version %d, has_aot_linked_classes=%d, has_platform_or_app_classes=%d",
+                       header->version(),
+                       header->has_aot_linked_classes(),
+                       header->has_platform_or_app_classes());
 
   for (int i = 0; i < NUM_CDS_REGIONS; i++) {
     FileMapRegion* r = header->region_at(i);
-    log_info(aot)("  region[%d]: used=%zu bytes", i, r->used());
+    log_info(aot, merge)("  region[%d]: used=%zu bytes", i, r->used());
   }
 
   // TODO: Collect classes loaded during this run that are not in the original cache

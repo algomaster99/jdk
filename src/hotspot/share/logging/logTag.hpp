@@ -124,6 +124,7 @@ class outputStream;
   LOG_TAG(marking) \
   LOG_TAG(membername) \
   LOG_TAG(memops) \
+  LOG_TAG(merge) \
   LOG_TAG(metadata) \
   LOG_TAG(metaspace) \
   LOG_TAG(methodcomparator) \
