@@ -208,6 +208,7 @@ public:
 
   // --- AOT cache merging at runtime
   static bool is_merging_aot_cache()                         { return CDS_ONLY(_is_merging_aot_cache) NOT_CDS(false); }
+  static void start_merging_aot_cache()                    NOT_CDS_RETURN;
 
   // Some CDS functions assume that they are called only within a single-threaded context. I.e.,
   // they are called from:
