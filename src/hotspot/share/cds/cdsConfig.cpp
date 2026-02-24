@@ -1091,32 +1091,3 @@ bool CDSConfig::is_dumping_adapters() {
   return (AOTAdapterCaching && is_dumping_final_static_archive());
 }
 
-void CDSConfig::start_merging_aot_cache() {
-  // defensive programming
-  if (!is_merging_aot_cache()) {
-    return;
-  }
-
-  const char* cache_path = input_static_archive_path();
-  log_info(aot, merge)("Starting AOT cache merge with input cache: %s", cache_path);
-
-  FileMapInfo* mapinfo = FileMapInfo::current_info();
-  if (mapinfo == nullptr) {
-    log_error(aot, merge)("Cannot merge: AOT cache was not loaded at startup");
-    return;
-  }
-
-  FileMapHeader* header = mapinfo->header();
-  log_info(aot, merge)("AOT cache header: version %d, has_aot_linked_classes=%d, has_platform_or_app_classes=%d",
-                       header->version(),
-                       header->has_aot_linked_classes(),
-                       header->has_platform_or_app_classes());
-
-  for (int i = 0; i < NUM_CDS_REGIONS; i++) {
-    FileMapRegion* r = header->region_at(i);
-    log_info(aot, merge)("  region[%d]: used=%zu bytes", i, r->used());
-  }
-
-  // TODO: Collect classes loaded during this run that are not in the original cache
-  // TODO: Write the merged cache
-}

@@ -438,7 +438,7 @@ void before_exit(JavaThread* thread, bool halt) {
   DynamicArchive::dump_at_exit(thread);
   assert(!thread->has_pending_exception(), "must be");
 
-  CDSConfig::start_merging_aot_cache();
+  AOTMetaspace::start_merging_aot_cache();
 #endif
 
   // Actual shutdown logic begins here.
