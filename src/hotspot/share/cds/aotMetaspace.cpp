@@ -2337,9 +2337,10 @@ void AOTMetaspace::start_merging_aot_cache() {
   collect_loaded_classes_for_merge(&new_classes);
   for (int i = 0; i < new_classes.length(); i++) {
     InstanceKlass* ik = new_classes.at(i);
-    log_debug(aot, merge)("  new class: %s (loader: %s)",
+    log_debug(aot, merge)("  new class: %s (loader: %s) (isHidden: %hhd)",
                           ik->external_name(),
-                          ik->class_loader_data()->loader_name());
+                          ik->class_loader_data()->loader_name(),
+                          ik->is_hidden());
   }
 
   // TODO: Write the merged cache
