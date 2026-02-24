@@ -146,7 +146,7 @@ public:
 
   // AOT cache merging at runtime
   static void start_merging_aot_cache() NOT_CDS_RETURN;
-  static void collect_loaded_classes_for_merge() NOT_CDS_RETURN;
+  static void collect_loaded_classes_for_merge(GrowableArray<InstanceKlass*>* new_classes) NOT_CDS_RETURN;
 
 #if INCLUDE_CDS
   // Alignment for the 2 core CDS regions (RW/RO) only.

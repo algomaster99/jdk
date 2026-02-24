@@ -2286,8 +2286,7 @@ public:
   }
 };
 
-void AOTMetaspace::collect_loaded_classes_for_merge() {
-  ResourceMark rm;
+void AOTMetaspace::collect_loaded_classes_for_merge(GrowableArray<InstanceKlass*>* to_be_merged_classes) {
   GrowableArray<InstanceKlass*> all_classes;
   GrowableArray<InstanceKlass*> new_classes;
 
@@ -2303,18 +2302,16 @@ void AOTMetaspace::collect_loaded_classes_for_merge() {
                        all_classes.length() - new_classes.length(),
                        new_classes.length());
 
-  for (int i = 0; i < new_classes.length(); i++) {
-    InstanceKlass* ik = new_classes.at(i);
-    log_debug(aot, merge)("  new class: %s (loader: %s)",
-                          ik->external_name(),
-                          ik->class_loader_data()->loader_name());
-  }
+  to_be_merged_classes->appendAll(&new_classes);
 }
 
 void AOTMetaspace::start_merging_aot_cache() {
   if (!CDSConfig::is_merging_aot_cache()) {
     return;
   }
+
+  // this is important so that we can allocate memory for new classes during the merge
+  ResourceMark rm;
 
   const char* cache_path = CDSConfig::input_static_archive_path();
   log_info(aot, merge)("Starting AOT cache merge with input cache: %s", cache_path);
@@ -2336,7 +2333,14 @@ void AOTMetaspace::start_merging_aot_cache() {
     log_info(aot, merge)("  region[%d]: used=%zu bytes", i, r->used());
   }
 
-  collect_loaded_classes_for_merge();
+  GrowableArray<InstanceKlass*> new_classes;
+  collect_loaded_classes_for_merge(&new_classes);
+  for (int i = 0; i < new_classes.length(); i++) {
+    InstanceKlass* ik = new_classes.at(i);
+    log_debug(aot, merge)("  new class: %s (loader: %s)",
+                          ik->external_name(),
+                          ik->class_loader_data()->loader_name());
+  }
 
   // TODO: Write the merged cache
 }
