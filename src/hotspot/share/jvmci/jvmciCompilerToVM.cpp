@@ -49,7 +49,6 @@
 #include "oops/instanceMirrorKlass.hpp"
 #include "oops/method.inline.hpp"
 #include "oops/objArrayKlass.inline.hpp"
-#include "oops/trainingData.hpp"
 #include "oops/typeArrayOop.inline.hpp"
 #include "prims/jvmtiExport.hpp"
 #include "prims/methodHandles.hpp"
@@ -507,14 +506,10 @@ C2V_VMENTRY_NULL(jobject, getResolvedJavaType0, (JNIEnv* env, jobject, jobject b
     } else if (JVMCIENV->isa_HotSpotMethodData(base_object)) {
       jlong base_address = (intptr_t) JVMCIENV->asMethodData(base_object);
       Klass* k = *((Klass**) (intptr_t) (base_address + offset));
-      if (k == nullptr || k->class_loader_data() == nullptr || !TrainingData::is_klass_loaded(k)) {
-        return nullptr;
-      }
       if (!k->is_loader_alive()) {
         // Klasses in methodData might be concurrently unloading so return null in that case.
         return nullptr;
       }
-      klass = k;
     } else {
       goto unexpected;
     }
