@@ -2062,3 +2062,93 @@ void MetaspaceShared::print_on(outputStream* st) {
   }
   st->cr();
 }
+
+
+class CollectLoadedClassesForMerge : public KlassClosure {
+  GrowableArray<InstanceKlass*>* _all_classes;
+  GrowableArray<InstanceKlass*>* _new_classes;
+
+public:
+  CollectLoadedClassesForMerge(GrowableArray<InstanceKlass*>* all_classes,
+                               GrowableArray<InstanceKlass*>* new_classes)
+    : _all_classes(all_classes), _new_classes(new_classes) {}
+
+  void do_klass(Klass* k) {
+    if (!k->is_instance_klass()) {
+      return;
+    }
+    InstanceKlass* ik = InstanceKlass::cast(k);
+    _all_classes->append(ik);
+
+    // this is -1 for classes not in the aot cache
+    if (ik->shared_classpath_index() == -1) {
+      _new_classes->append(ik);
+    }
+  }
+};
+
+void MetaspaceShared::collect_loaded_classes_for_merge(GrowableArray<InstanceKlass*>* to_be_merged_classes) {
+  GrowableArray<InstanceKlass*> all_classes;
+  GrowableArray<InstanceKlass*> new_classes;
+
+  {
+    MutexLocker lock(ClassLoaderDataGraph_lock);
+    CollectLoadedClassesForMerge closure(&all_classes, &new_classes);
+    // probably helps with class unloading
+    ClassLoaderDataGraph::loaded_classes_do_keepalive(&closure);
+  }
+
+  log_info(aot, merge)("Total loaded classes: %d, already in cache: %d, new classes to merge: %d",
+                       all_classes.length(),
+                       all_classes.length() - new_classes.length(),
+                       new_classes.length());
+  for (int i = 0; i < new_classes.length(); i++) {
+    InstanceKlass* ik = new_classes.at(i);
+    log_debug(aot, merge)("  new class: %s (loader: %s) (isHidden: %hhd)",
+                          ik->external_name(),
+                          ik->class_loader_data()->loader_name(),
+                          ik->is_hidden());
+  }
+
+  // Verify that new_classes is a subset of all_classes
+  // new_classes is filtered from all_classes, so this should always hold
+  assert(new_classes.length() <= all_classes.length(), "sanity");
+
+  // we only choose the new classes to update the cache
+  // if we do all_classes then we will rewrite the cache with all the classes, which is not what we want
+  to_be_merged_classes->appendAll(&new_classes);
+}
+
+void MetaspaceShared::start_merging_aot_cache() {
+  if (!CDSConfig::is_merging_aot_cache()) {
+    return;
+  }
+
+  // this is important so that we can allocate memory for new classes during the merge
+  ResourceMark rm;
+
+  const char* cache_path = CDSConfig::input_static_archive_path();
+  log_info(aot, merge)("Starting AOT cache merge with input cache: %s", cache_path);
+
+  FileMapInfo* mapinfo = FileMapInfo::current_info();
+  if (mapinfo == nullptr) {
+    log_error(aot, merge)("Cannot merge: AOT cache was not loaded at startup");
+    return;
+  }
+
+  FileMapHeader* header = mapinfo->header();
+  log_info(aot, merge)("AOT cache header: version %d, has_aot_linked_classes=%d, has_platform_or_app_classes=%d",
+                       header->version(),
+                       header->has_aot_linked_classes(),
+                       header->has_platform_or_app_classes());
+
+  for (int i = 0; i < NUM_CDS_REGIONS; i++) {
+    FileMapRegion* r = header->region_at(i);
+    log_info(aot, merge)("  region[%d]: used=%zu bytes", i, r->used());
+  }
+
+  GrowableArray<InstanceKlass*> new_classes;
+  collect_loaded_classes_for_merge(&new_classes);
+
+  // TODO: Write the merged cache
+}

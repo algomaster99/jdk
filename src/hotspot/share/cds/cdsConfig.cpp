@@ -55,6 +55,7 @@ bool CDSConfig::_has_temp_aot_config_file = false;
 bool CDSConfig::_old_cds_flags_used = false;
 bool CDSConfig::_new_aot_flags_used = false;
 bool CDSConfig::_disable_heap_dumping = false;
+bool CDSConfig::_is_merging_aot_cache = false;
 
 const char* CDSConfig::_default_archive_path = nullptr;
 const char* CDSConfig::_input_static_archive_path = nullptr;
@@ -76,6 +77,12 @@ DEBUG_ONLY(static bool _cds_ergo_initialize_started = false);
 
 void CDSConfig::ergo_initialize() {
   DEBUG_ONLY(_cds_ergo_initialize_started = true);
+
+  if (is_merging_aot_cache()) {
+    assert(RequireSharedSpaces, "merging AOT cache requires archive passed via -XX:AOTCache");
+    assert(UseSharedSpaces, "we must use AOTCache since we want to merge it");
+    log_info(aot,merge)("Sanity check in ergo_initalized pass");
+  }
 
   if (is_dumping_static_archive() && !is_dumping_final_static_archive()) {
     // Note: -Xshare and -XX:AOTMode flags are mutually exclusive.
@@ -452,6 +459,8 @@ void CDSConfig::check_aot_flags() {
     check_aotmode_off();
   } else if (strcmp(AOTMode, "record") == 0) {
     check_aotmode_record();
+  } else if (strcmp(AOTMode, "merge") == 0) {
+    check_aotmode_merge();
   } else {
     assert(strcmp(AOTMode, "create") == 0, "checked by AOTModeConstraintFunc");
     check_aotmode_create();
@@ -460,6 +469,22 @@ void CDSConfig::check_aot_flags() {
   // This is an old flag used by CDS regression testing only. It doesn't apply
   // to the AOT workflow.
   FLAG_SET_ERGO(AllowArchivingWithJavaAgent, false);
+}
+
+void CDSConfig::check_aotmode_merge() {
+  if (FLAG_IS_DEFAULT(AOTCache)) {
+    vm_exit_during_initialization("-XX:AOTMode=merge requires -XX:AOTCache to be specified");
+  }
+
+  // enable merging mode
+  _is_merging_aot_cache = true;
+  // AOTCache should be used
+  UseSharedSpaces = true;
+  // Fail if the AOTCache cannot be used
+  RequireSharedSpaces = true;
+
+  log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s", AOTCache);
+  // TODO: AOTCacheOutput should provide the name of the new AOTCache (combined one)
 }
 
 void CDSConfig::check_aotmode_off() {

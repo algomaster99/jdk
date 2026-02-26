@@ -135,6 +135,10 @@ public:
   static void link_shared_classes(TRAPS) NOT_CDS_RETURN;
   static bool may_be_eagerly_linked(InstanceKlass* ik) NOT_CDS_RETURN_(false);
 
+  // AOT cache merging at runtime
+  static void start_merging_aot_cache() NOT_CDS_RETURN;
+  static void collect_loaded_classes_for_merge(GrowableArray<InstanceKlass*>* new_classes) NOT_CDS_RETURN;
+
 #if INCLUDE_CDS
   // Alignment for the 2 core CDS regions (RW/RO) only.
   // (Heap region alignments are decided by GC).
