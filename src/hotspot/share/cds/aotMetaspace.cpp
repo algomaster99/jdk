@@ -2301,7 +2301,20 @@ void AOTMetaspace::collect_loaded_classes_for_merge(GrowableArray<InstanceKlass*
                        all_classes.length(),
                        all_classes.length() - new_classes.length(),
                        new_classes.length());
+  for (int i = 0; i < new_classes.length(); i++) {
+    InstanceKlass* ik = new_classes.at(i);
+    log_debug(aot, merge)("  new class: %s (loader: %s) (isHidden: %hhd)",
+                          ik->external_name(),
+                          ik->class_loader_data()->loader_name(),
+                          ik->is_hidden());
+  }
 
+  // Verify that new_classes is a subset of all_classes
+  // new_classes is filtered from all_classes, so this should always hold
+  assert(new_classes.length() <= all_classes.length(), "sanity");
+
+  // we only choose the new classes to update the cache
+  // if we do all_classes then we will rewrite the cache with all the classes, which is not what we want
   to_be_merged_classes->appendAll(&new_classes);
 }
 
@@ -2335,13 +2348,6 @@ void AOTMetaspace::start_merging_aot_cache() {
 
   GrowableArray<InstanceKlass*> new_classes;
   collect_loaded_classes_for_merge(&new_classes);
-  for (int i = 0; i < new_classes.length(); i++) {
-    InstanceKlass* ik = new_classes.at(i);
-    log_debug(aot, merge)("  new class: %s (loader: %s) (isHidden: %hhd)",
-                          ik->external_name(),
-                          ik->class_loader_data()->loader_name(),
-                          ik->is_hidden());
-  }
 
   // TODO: Write the merged cache
 }
