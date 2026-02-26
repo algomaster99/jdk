@@ -151,7 +151,6 @@ public class Threads {
 
         if (!VM.getVM().isCore()) {
             virtualConstructor.addMapping("CompilerThread", CompilerThread.class);
-            virtualConstructor.addMapping("TrainingReplayThread", HiddenJavaThread.class);
         }
 
         // These are all the visible JavaThread subclasses that execute java code.

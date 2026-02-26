@@ -37,7 +37,6 @@
 // which ensures that for each oop, at most one ciObject is created.
 // This invariant allows efficient implementation of ciObject.
 class ciObjectFactory : public ArenaObj {
-  friend class VMStructs;
   friend class ciEnv;
 
 private:
@@ -78,8 +77,8 @@ private:
     return p->object()->get_oop() == key;
   }
 
-  NonPermObject* &find_non_perm(Handle keyHandle);
-  void insert_non_perm(NonPermObject* &where, Handle keyHandle, ciObject* obj);
+  NonPermObject* &find_non_perm(oop key);
+  void insert_non_perm(NonPermObject* &where, oop key, ciObject* obj);
 
   void init_ident_of(ciBaseObject* obj);
 
@@ -106,9 +105,6 @@ public:
 
   // Get the ciSymbol corresponding to one of the vmSymbols.
   static ciSymbol* vm_symbol_at(vmSymbolID index);
-
-  // Called on every new object made.
-  void notice_new_object(ciBaseObject* new_object);
 
   // Get the ciMethod representing an unloaded/unfound method.
   ciMethod* get_unloaded_method(ciInstanceKlass* holder,

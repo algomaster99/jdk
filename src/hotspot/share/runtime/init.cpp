@@ -32,7 +32,6 @@
 #include "logging/logAsyncWriter.hpp"
 #include "memory/universe.hpp"
 #include "nmt/memTracker.hpp"
-#include "oops/trainingData.hpp"
 #include "prims/downcallLinker.hpp"
 #include "prims/jvmtiExport.hpp"
 #include "prims/methodHandles.hpp"
@@ -188,11 +187,6 @@ jint init_globals2() {
     JVMCI::initialize_globals();
   }
 #endif
-
-  // Initialize TrainingData only we're recording/replaying
-  if (TrainingData::have_data() || TrainingData::need_data()) {
-   TrainingData::initialize();
-  }
 
   if (!universe_post_init()) {
     return JNI_ERR;

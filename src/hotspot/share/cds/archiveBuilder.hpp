@@ -238,11 +238,6 @@ private:
   // statistics
   DumpAllocStats _alloc_stats;
   size_t _total_heap_region_size;
-  struct {
-    size_t _num_ptrs;
-    size_t _num_tagged_ptrs;
-    size_t _num_nulled_ptrs;
-  } _relocated_ptr_info;
 
   void print_region_stats(FileMapInfo *map_info, ArchiveHeapInfo* heap_info);
   void print_bitmap_region_stats(size_t size, size_t total_size);
@@ -262,8 +257,6 @@ public:
     }
     ~OtherROAllocMark();
   };
-
-  void count_relocated_pointer(bool tagged, bool nulled);
 
 private:
   FollowMode get_follow_mode(MetaspaceClosure::Ref *ref);
@@ -426,7 +419,6 @@ public:
   void relocate_metaspaceobj_embedded_pointers();
   void record_regenerated_object(address orig_src_obj, address regen_src_obj);
   void make_klasses_shareable();
-  void make_training_data_shareable();
   void relocate_to_requested();
   void write_archive(FileMapInfo* mapinfo, ArchiveHeapInfo* heap_info);
   void write_region(FileMapInfo* mapinfo, int region_idx, DumpRegion* dump_region,
@@ -451,8 +443,7 @@ public:
 
   address get_buffered_addr(address src_addr) const;
   template <typename T> T get_buffered_addr(T src_addr) const {
-    CDS_ONLY(return (T)get_buffered_addr((address)src_addr);)
-    NOT_CDS(return nullptr;)
+    return (T)get_buffered_addr((address)src_addr);
   }
 
   address get_source_addr(address buffered_addr) const;
@@ -465,8 +456,7 @@ public:
   GrowableArray<Symbol*>* symbols() const { return _symbols; }
 
   static bool is_active() {
-    CDS_ONLY(return (_current != nullptr));
-    NOT_CDS(return false;)
+    return (_current != nullptr);
   }
 
   static ArchiveBuilder* current() {
