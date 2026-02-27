@@ -476,8 +476,6 @@ InstanceKlass* SystemDictionaryShared::get_unregistered_class(Symbol* name) {
 }
 
 void SystemDictionaryShared::copy_unregistered_class_size_and_crc32(InstanceKlass* klass) {
-  precond(CDSConfig::is_dumping_final_static_archive());
-  precond(klass->is_shared());
 
   // A shared class must have a RunTimeClassInfo record
   const RunTimeClassInfo* record = find_record(&_static_archive._unregistered_dictionary,
@@ -1172,6 +1170,9 @@ void SystemDictionaryShared::get_all_archived_classes(bool is_static_archive, Gr
   get_archive(is_static_archive)->_builtin_dictionary.iterate([&] (const RunTimeClassInfo* record) {
       classes->append(record->klass());
     });
+  get_archive(is_static_archive)->_unregistered_dictionary.iterate([&](const RunTimeClassInfo* record) {
+    classes->append(record->klass());
+});
 }
 
 class SharedDictionaryPrinter : StackObj {

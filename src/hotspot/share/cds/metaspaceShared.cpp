@@ -2147,8 +2147,78 @@ void MetaspaceShared::start_merging_aot_cache() {
     log_info(aot, merge)("  region[%d]: used=%zu bytes", i, r->used());
   }
 
+  if (FLAG_IS_DEFAULT(AOTCacheOutput)) {
+    log_error(aot, merge)("Cannot merge: AOTCacheOutput must be specified (or defaulted) in merge mode");
+    return;
+  }
+
+  // Enable dumping so the dump-time machinery (dumptime_table, artifact finder, etc) can be used.
+  CDSConfig::enable_dumping_static_archive();
+  // Merge-at-runtime happens at VM shutdown. Avoid dumping archived heap objects and module graph.
+  CDSConfig::disable_heap_dumping();
+  JavaThread* current = JavaThread::current();
+  AOTClassLocationConfig::dumptime_init(current);
+  if (current->has_pending_exception()) {
+    log_error(aot, merge)("Cannot merge: failed to initialize classpath location config");
+    return;
+  }
+  SystemDictionaryShared::initialize();
+  AOTClassLinker::initialize();
+
+
+  // Seed dumptime_table with all classes that exist in the input AOT cache, including those
+  // that may never have been loaded during this run.
+  GrowableArray<Klass*> archived;
+  SystemDictionaryShared::get_all_archived_classes(/*is_static*/true, &archived);
+
+
+  log_info(aot, merge)("Found %d classes in archived dictionaries", archived.length());
+
+  for (int i=0; i<archived.length(); ++i) {
+    log_debug(aot, merge)("archived class %s", archived.at(i)->external_name());
+  }
+
+  using KlassTable = ResourceHashtable<Klass*, bool, 15889, AnyObj::C_HEAP, mtInternal>;
+  KlassTable seen_archived;
+  for (int i = 0; i < archived.length(); i++) {
+    Klass* k = archived.at(i);
+    if (k->is_instance_klass()) {
+      InstanceKlass* ik = InstanceKlass::cast(k);
+      bool created;
+      seen_archived.put_if_absent(ik, &created);
+      if (!created) {
+        continue;
+      }
+      SystemDictionaryShared::init_dumptime_info(ik);
+      if (!SystemDictionaryShared::is_builtin(ik)) {
+        // For archived unregistered classes, copy their fingerprint into dumptime info.
+        SystemDictionaryShared::copy_unregistered_class_size_and_crc32(ik);
+      }
+
+    }
+  }
+
+  // Add classes newly loaded from classfiles during this run.
   GrowableArray<InstanceKlass*> new_classes;
   collect_loaded_classes_for_merge(&new_classes);
-
-  // TODO: Write the merged cache
+  // for (int i = 0; i < new_classes.length(); i++) {
+  //   InstanceKlass* ik = new_classes.at(i);
+  //   if (ik->defined_by_other_loaders() || ik->is_hidden()) {
+  //     // Merge-at-runtime currently supports only built-in loaders.
+  //     continue;
+  //   }
+  //   SystemDictionaryShared::init_dumptime_info(ik);
+  // }
+  //
+  // log_info(aot, merge)("Dumping merged AOT cache to %s", AOTCacheOutput);
+  // CDSConfig::DumperThreadMark dumper_thread_mark(current);
+  // StaticArchiveBuilder builder;
+  // VM_PopulateDumpSharedSpace op(builder);
+  // VMThread::execute(&op);
+  // bool status = write_static_archive(&builder, op.map_info(), op.heap_info());
+  // if (!status) {
+  //   log_error(aot, merge)("Merged AOT cache dump failed");
+  // } else {
+  //   log_info(aot, merge)("Merged AOT cache written to %s", AOTCacheOutput);
+  // }
 }
