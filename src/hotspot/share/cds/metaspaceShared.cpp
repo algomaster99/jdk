@@ -2175,33 +2175,23 @@ void MetaspaceShared::start_merging_aot_cache() {
 
   log_info(aot, merge)("Found %d classes in archived dictionaries", archived.length());
 
-  for (int i=0; i<archived.length(); ++i) {
-    log_debug(aot, merge)("archived class %s", archived.at(i)->external_name());
-  }
-
-  using KlassTable = ResourceHashtable<Klass*, bool, 15889, AnyObj::C_HEAP, mtInternal>;
-  KlassTable seen_archived;
-  for (int i = 0; i < archived.length(); i++) {
-    Klass* k = archived.at(i);
-    if (k->is_instance_klass()) {
-      InstanceKlass* ik = InstanceKlass::cast(k);
-      bool created;
-      seen_archived.put_if_absent(ik, &created);
-      if (!created) {
-        continue;
-      }
-      SystemDictionaryShared::init_dumptime_info(ik);
-      if (!SystemDictionaryShared::is_builtin(ik)) {
-        // For archived unregistered classes, copy their fingerprint into dumptime info.
-        SystemDictionaryShared::copy_unregistered_class_size_and_crc32(ik);
-      }
-
-    }
-  }
-
   // Add classes newly loaded from classfiles during this run.
   GrowableArray<InstanceKlass*> new_classes;
   collect_loaded_classes_for_merge(&new_classes);
+
+  GrowableArray<Klass*> classes_for_merged_aot_cache;
+  classes_for_merged_aot_cache.appendAll(&archived);
+  for (int i = 0; i < new_classes.length(); i++) {
+    if (new_classes.at(i)->is_hidden()) {
+      continue;
+    }
+    classes_for_merged_aot_cache.append(new_classes.at(i));
+  }
+
+  log_info(aot, merge)("Total classes to merge %d", classes_for_merged_aot_cache.length());
+  for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
+    log_debug(aot, merge)("class for merged cache %s", classes_for_merged_aot_cache.at(i)->external_name());
+  }
   // for (int i = 0; i < new_classes.length(); i++) {
   //   InstanceKlass* ik = new_classes.at(i);
   //   if (ik->defined_by_other_loaders() || ik->is_hidden()) {
