@@ -261,7 +261,6 @@ void HeapShared::get_segment_indexes(int idx, int& seg_idx, int& int_idx) {
 // Returns an objArray that contains all the roots of the archived objects
 oop HeapShared::get_root(int index, bool clear) {
   assert(index >= 0, "sanity");
-  assert(!CDSConfig::is_dumping_heap() && CDSConfig::is_using_archive(), "runtime only");
   assert(!_root_segments->is_empty(), "must have loaded shared heap");
   int seg_idx, int_idx;
   get_segment_indexes(index, seg_idx, int_idx);

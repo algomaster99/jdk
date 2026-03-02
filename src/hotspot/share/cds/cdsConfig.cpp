@@ -437,7 +437,8 @@ void CDSConfig::check_aot_flags() {
     return;
   }
 
-  if (has_cache && has_cache_output) {
+  bool allow_cache_and_output = has_mode && strcmp(AOTMode, "merge") == 0;
+  if (has_cache && has_cache_output && !allow_cache_and_output) {
     vm_exit_during_initialization("Only one of AOTCache or AOTCacheOutput can be specified");
   }
 
@@ -478,13 +479,16 @@ void CDSConfig::check_aotmode_merge() {
 
   // enable merging mode
   _is_merging_aot_cache = true;
+
+  FLAG_SET_ERGO(AOTCacheOutput, "combined.aot");
+
   // AOTCache should be used
   UseSharedSpaces = true;
   // Fail if the AOTCache cannot be used
   RequireSharedSpaces = true;
 
-  log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s", AOTCache);
-  // TODO: AOTCacheOutput should provide the name of the new AOTCache (combined one)
+  log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s AOTCacheOutput=%s",
+                       AOTCache, AOTCacheOutput);
 }
 
 void CDSConfig::check_aotmode_off() {

@@ -647,9 +647,10 @@ char* VM_PopulateDumpSharedSpace::dump_read_only_tables(AOTClassLocationConfig*&
 }
 
 void VM_PopulateDumpSharedSpace::doit() {
-  if (!CDSConfig::is_dumping_final_static_archive()) {
-    guarantee(!CDSConfig::is_using_archive(), "We should not be using an archive when we dump");
-  }
+  // We can dump archive when using a shared archive
+  // if (!CDSConfig::is_dumping_final_static_archive()) {
+  //   guarantee(!CDSConfig::is_using_archive(), "We should not be using an archive when we dump");
+  // }
 
   DEBUG_ONLY(SystemDictionaryShared::NoClassLoadingMark nclm);
 
