@@ -753,7 +753,8 @@ void CDSConfig::prepare_for_dumping() {
 bool CDSConfig::is_dumping_classic_static_archive() {
   return _is_dumping_static_archive &&
     !is_dumping_preimage_static_archive() &&
-    !is_dumping_final_static_archive();
+    !is_dumping_final_static_archive() &&
+    !is_merging_aot_cache();
 }
 
 bool CDSConfig::is_dumping_preimage_static_archive() {

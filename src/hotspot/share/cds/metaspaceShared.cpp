@@ -2117,7 +2117,7 @@ void MetaspaceShared::collect_loaded_classes_for_merge(GrowableArray<InstanceKla
 
   // we only choose the new classes to update the cache
   // if we do all_classes then we will rewrite the cache with all the classes, which is not what we want
-  to_be_merged_classes->appendAll(&new_classes);
+  to_be_merged_classes->appendAll(&all_classes);
 }
 
 void MetaspaceShared::start_merging_aot_cache() {
@@ -2170,46 +2170,69 @@ void MetaspaceShared::start_merging_aot_cache() {
   // Seed dumptime_table with all classes that exist in the input AOT cache, including those
   // that may never have been loaded during this run.
   GrowableArray<Klass*> archived;
-  SystemDictionaryShared::get_all_archived_classes(/*is_static*/true, &archived);
+  SystemDictionaryShared::get_all_archived_classes(true, &archived);
 
 
   log_info(aot, merge)("Found %d classes in archived dictionaries", archived.length());
 
-  // Add classes newly loaded from classfiles during this run.
-  GrowableArray<InstanceKlass*> new_classes;
-  collect_loaded_classes_for_merge(&new_classes);
+  // Add loaded from classfiles during this run.
+  GrowableArray<InstanceKlass*> all_classes;
+  // We put all classes instead of only the new ones so that dependencies of new classes can also be cached.
+  collect_loaded_classes_for_merge(&all_classes);
 
   GrowableArray<Klass*> classes_for_merged_aot_cache;
-  classes_for_merged_aot_cache.appendAll(&archived);
-  for (int i = 0; i < new_classes.length(); i++) {
-    if (new_classes.at(i)->is_hidden()) {
+  for (int i = 0; i < all_classes.length(); i++) {
+    if (all_classes.at(i)->is_hidden()) {
       continue;
     }
-    classes_for_merged_aot_cache.append(new_classes.at(i));
+    classes_for_merged_aot_cache.append(all_classes.at(i));
+  }
+
+  for (int i = 0; i < archived.length(); i++) {
+    if (archived.at(i)->is_hidden()) {
+      continue;
+    }
+    bool already_in_new_classes = false;
+    for (int j=0; j < all_classes.length(); j++) {
+      if (strcmp(archived.at(i)->external_name(), all_classes.at(j)->external_name()) == 0) {
+        // already included
+        // TODO: should probably use a set
+        already_in_new_classes = true;
+        break;
+      }
+    }
+    if (already_in_new_classes) {
+      continue;
+    }
+    classes_for_merged_aot_cache.append(archived.at(i));
   }
 
   log_info(aot, merge)("Total classes to merge %d", classes_for_merged_aot_cache.length());
   for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
     log_debug(aot, merge)("class for merged cache %s", classes_for_merged_aot_cache.at(i)->external_name());
   }
-  // for (int i = 0; i < new_classes.length(); i++) {
-  //   InstanceKlass* ik = new_classes.at(i);
-  //   if (ik->defined_by_other_loaders() || ik->is_hidden()) {
-  //     // Merge-at-runtime currently supports only built-in loaders.
-  //     continue;
-  //   }
-  //   SystemDictionaryShared::init_dumptime_info(ik);
-  // }
-  //
-  // log_info(aot, merge)("Dumping merged AOT cache to %s", AOTCacheOutput);
-  // CDSConfig::DumperThreadMark dumper_thread_mark(current);
-  // StaticArchiveBuilder builder;
-  // VM_PopulateDumpSharedSpace op(builder);
-  // VMThread::execute(&op);
-  // bool status = write_static_archive(&builder, op.map_info(), op.heap_info());
-  // if (!status) {
-  //   log_error(aot, merge)("Merged AOT cache dump failed");
-  // } else {
-  //   log_info(aot, merge)("Merged AOT cache written to %s", AOTCacheOutput);
-  // }
+
+  // Initialize dumptime info for all classes in the merged cache
+  for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
+    Klass* k = classes_for_merged_aot_cache.at(i);
+    if (k->is_hidden()) {
+      continue;
+    }
+    if (k->is_instance_klass()) {
+      InstanceKlass* ik = InstanceKlass::cast(k);
+      SystemDictionaryShared::init_dumptime_info(ik);
+    }
+  }
+
+  log_info(aot, merge)("Dumping merged AOT cache to %s", AOTCacheOutput);
+  CDSConfig::DumperThreadMark dumper_thread_mark(current);
+  StaticArchiveBuilder builder;
+  VM_PopulateDumpSharedSpace op(builder);
+  VMThread::execute(&op);
+  bool status = write_static_archive(&builder, op.map_info(), op.heap_info());
+  if (!status) {
+    log_error(aot, merge)("Merged AOT cache dump failed");
+  } else {
+    log_info(aot, merge)("Merged AOT cache written to %s", AOTCacheOutput);
+  }
 }

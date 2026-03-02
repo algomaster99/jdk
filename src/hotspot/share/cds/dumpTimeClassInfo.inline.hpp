@@ -48,6 +48,12 @@ void DumpTimeSharedClassTable::iterate_all_live_classes(Function function) const
     if (CDSConfig::is_dumping_final_static_archive() && !k->is_loaded()) {
       assert(k->defined_by_other_loaders(), "must be");
       function(k, info);
+    } else if (CDSConfig::is_merging_aot_cache()) {
+      // For merge mode, check if class loader is alive before processing
+      // Shared classes from the input cache (like interfaces) may have null CLD
+      if (k->class_loader_data() != nullptr && k->is_loader_alive()) {
+        function(k, info);
+      }
     } else if (k->is_loader_alive()) {
       function(k, info);
       assert(k->is_loader_alive(), "must not change");
