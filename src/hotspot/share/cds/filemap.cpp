@@ -153,7 +153,8 @@ FileMapInfo::~FileMapInfo() {
 }
 
 void FileMapInfo::free_current_info() {
-  assert(CDSConfig::is_dumping_final_static_archive(), "only supported in this mode");
+  assert(CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache(),
+         "only supported in final static archive or merge modes");
   assert(_current_info != nullptr, "sanity");
   delete _current_info;
   assert(_current_info == nullptr, "sanity"); // Side effect expected from the above "delete" operator.

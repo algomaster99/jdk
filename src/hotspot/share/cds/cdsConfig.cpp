@@ -637,6 +637,10 @@ void CDSConfig::ergo_init_aot_paths() {
     } else {
       _input_static_archive_path = AOTCache;
     }
+    if (is_merging_aot_cache()) {
+      // In merge mode, the output is the combined cache (set by check_aotmode_merge)
+      _output_archive_path = AOTCacheOutput;
+    }
   }
 }
 

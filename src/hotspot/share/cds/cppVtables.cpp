@@ -231,10 +231,9 @@ char* CppVtables::_vtables_serialized_base = nullptr;
 void CppVtables::dumptime_init(ArchiveBuilder* builder) {
   assert(CDSConfig::is_dumping_static_archive(), "cpp tables are only dumped into static archive");
 
-  if (CDSConfig::is_dumping_final_static_archive()) {
-    // When dumping final archive, _index[kind] at this point is in the preimage.
-    // Remember these vtable pointers in _archived_cpp_vtptrs, as _index[kind] will now be rewritten
-    // to point to the runtime vtable data.
+  if (CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache()) {
+    // Without this, we get an error that "kind" of some classes is greater than _num_cloned_vtable_kinds
+    // See get_archived_table below
     for (int i = 0; i < _num_cloned_vtable_kinds; i++) {
       assert(_index[i] != nullptr, "must have been restored by CppVtables::serialize()");
       _archived_cpp_vtptrs[i] = _index[i]->cloned_vtable();
