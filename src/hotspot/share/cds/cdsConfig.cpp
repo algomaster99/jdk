@@ -480,7 +480,7 @@ void CDSConfig::check_aotmode_merge() {
   // enable merging mode
   _is_merging_aot_cache = true;
 
-  FLAG_SET_ERGO(AOTCacheOutput, "combined.aot");
+  FLAG_SET_ERGO_IF_DEFAULT(AOTCacheOutput, "combined.aot");
 
   // AOTCache should be used
   UseSharedSpaces = true;
