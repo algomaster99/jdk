@@ -1038,6 +1038,9 @@ void HeapShared::init_root_segment_sizes(int max_size_elems) {
 void HeapShared::serialize_tables(SerializeClosure* soc) {
 
 #ifndef PRODUCT
+  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
+    _archived_ArchiveHeapTestClass = nullptr;
+  }
   soc->do_ptr(&_archived_ArchiveHeapTestClass);
   if (soc->reading() && _archived_ArchiveHeapTestClass != nullptr) {
     _test_class_name = _archived_ArchiveHeapTestClass->adr_at(0);
@@ -1045,6 +1048,12 @@ void HeapShared::serialize_tables(SerializeClosure* soc) {
   }
 #endif
 
+  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
+    // In merge mode, heap is not dumped, so these tables still have stale pointers
+    // from the old archive. Reset to avoid serializing invalid addresses.
+    _run_time_subgraph_info_table.reset();
+    _run_time_special_subgraph = nullptr;
+  }
   _run_time_subgraph_info_table.serialize_header(soc);
   soc->do_ptr(&_run_time_special_subgraph);
 }

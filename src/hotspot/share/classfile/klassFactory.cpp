@@ -219,6 +219,11 @@ InstanceKlass* KlassFactory::create_from_stream(ClassFileStream* stream,
 #if INCLUDE_CDS
   if (CDSConfig::is_dumping_archive()) {
     ClassLoader::record_result(THREAD, result, stream, old_stream != stream);
+  } else if (CDSConfig::is_merging_aot_cache() && !result->is_hidden()) {
+    ClassLoaderData* cld = result->class_loader_data();
+    if (cld != nullptr && !SystemDictionaryShared::is_builtin_loader(cld)) {
+      SystemDictionaryShared::save_classfile_crc_for_merge(result, stream);
+    }
   }
 #endif // INCLUDE_CDS
 

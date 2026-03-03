@@ -1113,6 +1113,9 @@ void StringTable::set_shared_strings_array_index(int root_index) {
 }
 
 void StringTable::serialize_shared_table_header(SerializeClosure* soc) {
+  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
+    _shared_table.reset();
+  }
   _shared_table.serialize_header(soc);
 
   if (soc->writing()) {

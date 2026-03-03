@@ -184,6 +184,13 @@ void ClassLoaderDataShared::init_archived_tables() {
 }
 
 void ClassLoaderDataShared::serialize(SerializeClosure* f) {
+  if (f->writing() && CDSConfig::is_merging_aot_cache()) {
+    // In merge mode, these contain stale pointers from the old archive.
+    _archived_boot_loader_data = ArchivedClassLoaderData();
+    _archived_platform_loader_data = ArchivedClassLoaderData();
+    _archived_system_loader_data = ArchivedClassLoaderData();
+    _archived_javabase_moduleEntry = nullptr;
+  }
   _archived_boot_loader_data.serialize(f);
   _archived_platform_loader_data.serialize(f);
   _archived_system_loader_data.serialize(f);

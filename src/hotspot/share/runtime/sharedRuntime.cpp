@@ -24,6 +24,7 @@
 
 #include "cds/archiveBuilder.hpp"
 #include "cds/archiveUtils.inline.hpp"
+#include "cds/cdsConfig.hpp"
 #include "classfile/classLoader.hpp"
 #include "classfile/javaClasses.inline.hpp"
 #include "classfile/stringTable.hpp"
@@ -2934,6 +2935,9 @@ void AdapterHandlerLibrary::dump_aot_adapter_table() {
 }
 
 void AdapterHandlerLibrary::serialize_shared_table_header(SerializeClosure* soc) {
+  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
+    _aot_adapter_handler_table.reset();
+  }
   _aot_adapter_handler_table.serialize_header(soc);
 }
 

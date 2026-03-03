@@ -443,13 +443,12 @@ void ConstantPool::remove_unshareable_info() {
   }
 
   bool update_resolved_reference = true;
-  if (CDSConfig::is_dumping_final_static_archive()) {
+  if (CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache()) {
     ConstantPool* src_cp = ArchiveBuilder::current()->get_source_addr(this);
     InstanceKlass* src_holder = src_cp->pool_holder();
-    if (src_holder->defined_by_other_loaders()) {
-      // Unregistered classes are not loaded in the AOT assembly phase. The resolved reference length
-      // is already saved during the training run.
-      precond(!src_holder->is_loaded());
+    if (src_holder->is_shared() && src_holder->class_loader_data() == nullptr) {
+      // Shared classes not loaded during the merge/final assembly phase. The resolved
+      // reference length is already saved from the input archive.
       precond(resolved_reference_length() >= 0);
       precond(resolved_references() == nullptr);
       update_resolved_reference = false;

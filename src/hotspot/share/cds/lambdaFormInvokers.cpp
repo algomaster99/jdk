@@ -273,6 +273,10 @@ void LambdaFormInvokers::read_static_archive_invokers() {
 }
 
 void LambdaFormInvokers::serialize(SerializeClosure* soc) {
+  // Probably this should not be done as this boosts performance
+  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
+    _static_archive_invokers = nullptr;
+  }
   soc->do_ptr(&_static_archive_invokers);
   if (soc->reading() && CDSConfig::is_dumping_final_static_archive()) {
     if (!CDSConfig::is_dumping_aot_linked_classes()) {

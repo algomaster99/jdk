@@ -31,6 +31,13 @@ AOTLinkedClassTable AOTLinkedClassTable::_for_static_archive;
 AOTLinkedClassTable AOTLinkedClassTable::_for_dynamic_archive;
 
 void AOTLinkedClassTable::serialize(SerializeClosure* soc) {
+  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
+    // In merge mode, these arrays contain stale pointers from the old archive.
+    _boot = nullptr;
+    _boot2 = nullptr;
+    _platform = nullptr;
+    _app = nullptr;
+  }
   soc->do_ptr((void**)&_boot);
   soc->do_ptr((void**)&_boot2);
   soc->do_ptr((void**)&_platform);
