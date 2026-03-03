@@ -221,6 +221,9 @@ public:
   static void update_shared_entry(InstanceKlass* klass, int id);
   static void set_shared_class_misc_info(InstanceKlass* k, ClassFileStream* cfs);
 
+  static void save_classfile_crc_for_merge(InstanceKlass* k, const ClassFileStream* cfs);
+  static bool apply_saved_merge_crc(InstanceKlass* k);
+
   static InstanceKlass* lookup_from_stream(Symbol* class_name,
                                            Handle class_loader,
                                            Handle protection_domain,

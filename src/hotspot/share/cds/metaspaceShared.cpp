@@ -510,6 +510,9 @@ void MetaspaceShared::serialize(SerializeClosure* soc) {
   soc->do_tag(--tag);
 
   CDS_JAVA_HEAP_ONLY(ClassLoaderDataShared::serialize(soc);)
+  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
+    _archived_method_handle_intrinsics = nullptr;
+  }
   soc->do_ptr((void**)&_archived_method_handle_intrinsics);
 
   LambdaFormInvokers::serialize(soc);
@@ -699,8 +702,9 @@ void VM_PopulateDumpSharedSpace::doit() {
   CppVtables::zero_archived_vtables();
 
   // Write the archive file
-  if (CDSConfig::is_dumping_final_static_archive()) {
-    FileMapInfo::free_current_info(); // FIXME: should not free current info
+  if (CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache()) {
+    // Free the input archive's FileMapInfo so we can create a new one for the output.
+    FileMapInfo::free_current_info();
   }
   const char* static_archive = CDSConfig::output_archive_path();
   assert(static_archive != nullptr, "sanity");
@@ -2117,7 +2121,7 @@ void MetaspaceShared::collect_loaded_classes_for_merge(GrowableArray<InstanceKla
 
   // we only choose the new classes to update the cache
   // if we do all_classes then we will rewrite the cache with all the classes, which is not what we want
-  to_be_merged_classes->appendAll(&all_classes);
+  to_be_merged_classes->appendAll(&new_classes);
 }
 
 void MetaspaceShared::start_merging_aot_cache() {
@@ -2176,16 +2180,71 @@ void MetaspaceShared::start_merging_aot_cache() {
   log_info(aot, merge)("Found %d classes in archived dictionaries", archived.length());
 
   // Add loaded from classfiles during this run.
-  GrowableArray<InstanceKlass*> all_classes;
+  GrowableArray<InstanceKlass*> newly_loaded_classes;
   // We put all classes instead of only the new ones so that dependencies of new classes can also be cached.
-  collect_loaded_classes_for_merge(&all_classes);
+  collect_loaded_classes_for_merge(&newly_loaded_classes);
+
+  for (int i = 0; i < newly_loaded_classes.length(); i++) {
+    InstanceKlass* ik = newly_loaded_classes.at(i);
+    if (ik->shared_classpath_index() != -1 || ik->is_hidden()) {
+      continue; // already has a valid index, or is hidden (handled separately)
+    }
+    oop loader = ik->class_loader();
+    if (loader == nullptr) {
+      int classpath_index = 0; // boot classpath (modules image)
+      AOTClassLocationConfig::dumptime_update_max_used_index(classpath_index);
+      ik->set_shared_classpath_index(classpath_index);
+      log_debug(aot, merge)("  assigned classpath_index=%d (boot) to %s",
+                            classpath_index, ik->external_name());
+    } else if (SystemDictionary::is_system_class_loader(loader)) {
+      // App classpath: use the first app classpath entry
+      int classpath_index = AOTClassLocationConfig::dumptime()->app_cp_start_index();
+      AOTClassLocationConfig::dumptime_set_has_app_classes();
+      AOTClassLocationConfig::dumptime_update_max_used_index(classpath_index);
+      ik->set_shared_classpath_index(classpath_index);
+      log_debug(aot, merge)("  assigned classpath_index=%d (app) to %s",
+                            classpath_index, ik->external_name());
+    } else if (SystemDictionary::is_platform_class_loader(loader)) {
+      int classpath_index = 0; // simplified: modules image covers platform classes
+      AOTClassLocationConfig::dumptime_set_has_platform_classes();
+      AOTClassLocationConfig::dumptime_update_max_used_index(classpath_index);
+      ik->set_shared_classpath_index(classpath_index);
+      log_debug(aot, merge)("  assigned classpath_index=%d (platform) to %s",
+                            classpath_index, ik->external_name());
+    } else {
+      // Custom classloader (e.g., source launcher's MemoryClassLoader).
+      // Mark as UNREGISTERED so the class goes in the unregistered dictionary
+      // and can be matched by CRC at runtime via lookup_from_stream().
+      ik->set_shared_classpath_index(UNREGISTERED_INDEX);
+      log_debug(aot, merge)("  assigned UNREGISTERED_INDEX to %s (custom loader)",
+                            ik->external_name());
+    }
+  }
+
+  // Make symbols of new classes permanent so they can be archived.
+  // In normal CDS dumps, symbols are permanent by the time archiving starts.
+  // In merge mode, new classes were loaded at runtime and their symbols may be refcounted.
+  for (int i = 0; i < newly_loaded_classes.length(); i++) {
+    InstanceKlass* ik = newly_loaded_classes.at(i);
+    ik->name()->make_permanent();
+    // Also make symbols in the constant pool permanent
+    ConstantPool* cp = ik->constants();
+    for (int j = 1; j < cp->length(); j++) {
+      if (cp->tag_at(j).is_utf8()) {
+        Symbol* sym = cp->symbol_at(j);
+        if (sym != nullptr) {
+          sym->make_permanent();
+        }
+      }
+    }
+  }
 
   GrowableArray<Klass*> classes_for_merged_aot_cache;
-  for (int i = 0; i < all_classes.length(); i++) {
-    if (all_classes.at(i)->is_hidden()) {
+  for (int i = 0; i < newly_loaded_classes.length(); i++) {
+    if (newly_loaded_classes.at(i)->is_hidden()) {
       continue;
     }
-    classes_for_merged_aot_cache.append(all_classes.at(i));
+    classes_for_merged_aot_cache.append(newly_loaded_classes.at(i));
   }
 
   for (int i = 0; i < archived.length(); i++) {
@@ -2193,8 +2252,8 @@ void MetaspaceShared::start_merging_aot_cache() {
       continue;
     }
     bool already_in_new_classes = false;
-    for (int j=0; j < all_classes.length(); j++) {
-      if (strcmp(archived.at(i)->external_name(), all_classes.at(j)->external_name()) == 0) {
+    for (int j=0; j < newly_loaded_classes.length(); j++) {
+      if (strcmp(archived.at(i)->external_name(), newly_loaded_classes.at(j)->external_name()) == 0) {
         // already included
         // TODO: should probably use a set
         already_in_new_classes = true;
@@ -2221,6 +2280,32 @@ void MetaspaceShared::start_merging_aot_cache() {
     if (k->is_instance_klass()) {
       InstanceKlass* ik = InstanceKlass::cast(k);
       SystemDictionaryShared::init_dumptime_info(ik);
+    }
+  }
+
+  // Set CRC info for UNREGISTERED classes so they can be matched at runtime
+  // via lookup_from_stream(). There are two cases:
+  // 1. Shared classes from the input archive: copy CRC from the old archive record
+  // 2. New classes loaded by custom loaders during merge: apply saved CRC from loading time
+  for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
+    Klass* k = classes_for_merged_aot_cache.at(i);
+    if (!k->is_instance_klass() || k->is_hidden()) {
+      continue;
+    }
+    InstanceKlass* ik = InstanceKlass::cast(k);
+    if (ik->shared_classpath_index() == UNREGISTERED_INDEX) {
+      if (ik->is_shared()) {
+        // Case 1: shared class from input archive - copy CRC from old archive
+        SystemDictionaryShared::copy_unregistered_class_size_and_crc32(ik);
+        log_debug(aot, merge)("  copied CRC from input archive for %s", ik->external_name());
+      } else {
+        // Case 2: new class loaded by custom loader - apply saved CRC
+        if (SystemDictionaryShared::apply_saved_merge_crc(ik)) {
+          log_debug(aot, merge)("  applied saved CRC for %s", ik->external_name());
+        } else {
+          log_warning(aot, merge)("  no CRC info available for unregistered class %s", ik->external_name());
+        }
+      }
     }
   }
 

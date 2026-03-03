@@ -87,6 +87,15 @@ DumpTimeSharedClassTable* SystemDictionaryShared::_dumptime_table = nullptr;
 // Used by NoClassLoadingMark
 DEBUG_ONLY(bool SystemDictionaryShared::_class_loading_may_happen = true;)
 
+// This is needed because ClassLoader::record_result() is not called
+// during the merge run (is_dumping_archive() is false at that point).
+struct MergeCrcEntry {
+  InstanceKlass* klass;
+  int clsfile_size;
+  int clsfile_crc32;
+};
+static GrowableArrayCHeap<MergeCrcEntry, mtClass>* _merge_crc_entries = nullptr;
+
 #ifdef ASSERT
 static void check_klass_after_loading(const Klass* k) {
 #ifdef _LP64
@@ -250,9 +259,9 @@ bool SystemDictionaryShared::is_early_klass(InstanceKlass* ik) {
 }
 
 bool SystemDictionaryShared::check_for_exclusion_impl(InstanceKlass* k) {
-  if (CDSConfig::is_dumping_final_static_archive() && k->defined_by_other_loaders()
+  if ((CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache())
       && k->is_shared()) {
-    return false; // Do not exclude: unregistered classes are passed from preimage to final image.
+    return false; // Do not exclude: shared classes are passed from input archive to merged/final image.
   }
 
   if (k->is_in_error_state()) {
@@ -496,6 +505,34 @@ void SystemDictionaryShared::set_shared_class_misc_info(InstanceKlass* k, ClassF
   info->_clsfile_crc32 = ClassLoader::crc32(0, (const char*)cfs->buffer(), cfs->length());
 }
 
+void SystemDictionaryShared::save_classfile_crc_for_merge(InstanceKlass* k, const ClassFileStream* cfs) {
+  assert(CDSConfig::is_merging_aot_cache(), "only during merge");
+  if (_merge_crc_entries == nullptr) {
+    _merge_crc_entries = new GrowableArrayCHeap<MergeCrcEntry, mtClass>(64);
+  }
+  MergeCrcEntry entry;
+  entry.klass = k;
+  entry.clsfile_size = cfs->length();
+  entry.clsfile_crc32 = ClassLoader::crc32(0, (const char*)cfs->buffer(), cfs->length());
+  _merge_crc_entries->append(entry);
+  log_debug(aot, merge)("Saved CRC for %s: size=%d crc32=%d", k->external_name(), entry.clsfile_size, entry.clsfile_crc32);
+}
+
+bool SystemDictionaryShared::apply_saved_merge_crc(InstanceKlass* k) {
+  if (_merge_crc_entries != nullptr) {
+    for (int i = 0; i < _merge_crc_entries->length(); i++) {
+      MergeCrcEntry& entry = _merge_crc_entries->at(i);
+      if (entry.klass == k) {
+        DumpTimeClassInfo* info = get_info(k);
+        info->_clsfile_size = entry.clsfile_size;
+        info->_clsfile_crc32 = entry.clsfile_crc32;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 void SystemDictionaryShared::initialize() {
   if (CDSConfig::is_dumping_archive()) {
     _dumptime_table = new (mtClass) DumpTimeSharedClassTable;
@@ -584,6 +621,11 @@ void SystemDictionaryShared::validate_before_archiving(InstanceKlass* k) {
   assert(!class_loading_may_happen(), "class loading must be disabled");
   guarantee(info != nullptr, "Class %s must be entered into _dumptime_table", name);
   guarantee(!info->is_excluded(), "Should not attempt to archive excluded class %s", name);
+  if (CDSConfig::is_merging_aot_cache()) {
+    // In merge mode, classes may have been loaded by custom classloaders but assigned
+    // a builtin classpath index for archiving. Skip the loader type validation.
+    return;
+  }
   if (is_builtin(k)) {
     if (k->is_hidden()) {
       if (CDSConfig::is_dumping_lambdas_in_legacy_mode()) {
@@ -754,6 +796,11 @@ void SystemDictionaryShared::dumptime_classes_do(MetaspaceClosure* it) {
     if (CDSConfig::is_dumping_final_static_archive() && !k->is_loaded()) {
       assert(k->defined_by_other_loaders(), "must be");
       info.metaspace_pointers_do(it);
+    } else if (CDSConfig::is_merging_aot_cache() && k->is_shared() && k->class_loader_data() == nullptr) {
+      // Shared class from input cache, not loaded during merge run. Include it.
+      if (!info.is_excluded()) {
+        info.metaspace_pointers_do(it);
+      }
     } else if (k->is_loader_alive() && !info.is_excluded()) {
       info.metaspace_pointers_do(it);
     }
