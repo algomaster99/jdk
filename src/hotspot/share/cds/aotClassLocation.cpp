@@ -1003,7 +1003,8 @@ bool AOTClassLocationConfig::validate(const char* cache_filename, bool has_aot_l
                                use_lcp_match, runtime_lcp, runtime_lcp_len);
     log_info(class, path)("Archived boot classpath validation: %s", success ? "passed" : "failed");
 
-    if (success && need_to_check_app_classpath()) {
+    // We skip classpath validation when we are merging AOTCache
+    if (success && need_to_check_app_classpath() && !CDSConfig::is_merging_aot_cache()) {
       success = check_classpaths(false, has_aot_linked_classes, app_cp_start_index(), app_cp_end_index(), all_css.app_cp(),
                                  use_lcp_match, runtime_lcp, runtime_lcp_len);
       log_info(class, path)("Archived app classpath validation: %s", success ? "passed" : "failed");
