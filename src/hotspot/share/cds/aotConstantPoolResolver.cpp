@@ -82,12 +82,6 @@ bool AOTConstantPoolResolver::is_class_resolution_deterministic(InstanceKlass* c
   assert(!is_in_archivebuilder_buffer(cp_holder), "sanity");
   assert(!is_in_archivebuilder_buffer(resolved_class), "sanity");
 
-  if (cp_holder->class_loader_data() == nullptr) {
-    // Shared class from input archive not loaded during this merge/assembly phase.
-    // Cannot verify resolution determinism without class loader context.
-    return false;
-  }
-
   if (resolved_class->is_instance_klass()) {
     InstanceKlass* ik = InstanceKlass::cast(resolved_class);
 
@@ -110,6 +104,11 @@ bool AOTConstantPoolResolver::is_class_resolution_deterministic(InstanceKlass* c
         return false;
       }
     } else if (AOTClassLinker::is_vm_class(ik)) {
+      if (cp_holder->class_loader_data() == nullptr || ik->class_loader_data() == nullptr) {
+        // Shared class from input archive not loaded during this merge/assembly phase.
+        // Use loader-type flags instead of class_loader_data() to check loader equality.
+        return cp_holder->defined_by_boot_loader() && ik->defined_by_boot_loader();
+      }
       if (ik->class_loader() != cp_holder->class_loader()) {
         // At runtime, cp_holder() may not be able to resolve to the same
         // ik. For example, a different version of ik may be defined in
