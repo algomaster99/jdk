@@ -82,6 +82,12 @@ bool AOTConstantPoolResolver::is_class_resolution_deterministic(InstanceKlass* c
   assert(!is_in_archivebuilder_buffer(cp_holder), "sanity");
   assert(!is_in_archivebuilder_buffer(resolved_class), "sanity");
 
+  if (cp_holder->class_loader_data() == nullptr) {
+    // Shared class from input archive not loaded during this merge/assembly phase.
+    // Cannot verify resolution determinism without class loader context.
+    return false;
+  }
+
   if (resolved_class->is_instance_klass()) {
     InstanceKlass* ik = InstanceKlass::cast(resolved_class);
 
