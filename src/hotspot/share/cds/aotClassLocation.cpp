@@ -405,10 +405,6 @@ bool AOTClassLocation::check(const char* runtime_path, bool has_aot_linked_class
       aot_log_warning(aot)("'%s' must be a file", runtime_path);
       return false;
     }
-    if (!os::dir_is_empty(runtime_path)) {
-      aot_log_warning(aot)("directory is not empty: '%s'", runtime_path);
-      return false;
-    }
   } else {
     if (_file_type == FileType::NOT_EXIST) {
       aot_log_warning(aot)("'%s' must not exist", runtime_path);
@@ -698,10 +694,6 @@ void AOTClassLocationConfig::check_nonempty_dirs() const {
     }
     return true; // keep iterating
   });
-
-  if (has_nonempty_dir) {
-    vm_exit_during_cds_dumping("Cannot have non-empty directory in paths", nullptr);
-  }
 }
 
 // It's possible to use reflection+setAccessible to call into ClassLoader::defineClass() to
@@ -1024,6 +1016,9 @@ bool AOTClassLocationConfig::validate(const char* cache_filename, bool has_aot_l
 
   if (success) {
     _runtime_instance = this;
+  } else if (CDSConfig::is_merging_aot_cache()) {
+    return true;
+
   } else {
     const char* mismatch_msg = "shared class paths mismatch";
     const char* hint_msg = log_is_enabled(Info, class, path) ?
