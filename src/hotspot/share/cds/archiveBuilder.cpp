@@ -513,6 +513,14 @@ void ArchiveBuilder::gather_source_objs() {
 bool ArchiveBuilder::is_excluded(Klass* klass) {
   if (klass->is_instance_klass()) {
     InstanceKlass* ik = InstanceKlass::cast(klass);
+    if (CDSConfig::is_merging_aot_cache() && ik->is_shared() && ik->class_loader_data() == nullptr) {
+      // Shared class from input archive not loaded during this merge run.
+      DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(ik);
+      if (info == nullptr) {
+        info = SystemDictionaryShared::dumptime_table()->allocate_info(ik);
+      }
+      return info->is_excluded();
+    }
     return SystemDictionaryShared::is_excluded_class(ik);
   } else if (klass->is_objArray_klass()) {
     Klass* bottom = ObjArrayKlass::cast(klass)->bottom_klass();
@@ -520,7 +528,15 @@ bool ArchiveBuilder::is_excluded(Klass* klass) {
       // The bottom class is in the static archive so it's clearly not excluded.
       return false;
     } else if (bottom->is_instance_klass()) {
-      return SystemDictionaryShared::is_excluded_class(InstanceKlass::cast(bottom));
+      InstanceKlass* bottom_ik = InstanceKlass::cast(bottom);
+      if (CDSConfig::is_merging_aot_cache() && bottom_ik->is_shared() && bottom_ik->class_loader_data() == nullptr) {
+        DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(bottom_ik);
+        if (info == nullptr) {
+          info = SystemDictionaryShared::dumptime_table()->allocate_info(bottom_ik);
+        }
+        return info->is_excluded();
+      }
+      return SystemDictionaryShared::is_excluded_class(bottom_ik);
     }
   }
 
