@@ -2283,32 +2283,6 @@ void MetaspaceShared::start_merging_aot_cache() {
     }
   }
 
-  // Set CRC info for UNREGISTERED classes so they can be matched at runtime
-  // via lookup_from_stream(). There are two cases:
-  // 1. Shared classes from the input archive: copy CRC from the old archive record
-  // 2. New classes loaded by custom loaders during merge: apply saved CRC from loading time
-  for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
-    Klass* k = classes_for_merged_aot_cache.at(i);
-    if (!k->is_instance_klass() || k->is_hidden()) {
-      continue;
-    }
-    InstanceKlass* ik = InstanceKlass::cast(k);
-    if (ik->shared_classpath_index() == UNREGISTERED_INDEX) {
-      if (ik->is_shared()) {
-        // Case 1: shared class from input archive - copy CRC from old archive
-        SystemDictionaryShared::copy_unregistered_class_size_and_crc32(ik);
-        log_debug(aot, merge)("  copied CRC from input archive for %s", ik->external_name());
-      } else {
-        // Case 2: new class loaded by custom loader - apply saved CRC
-        if (SystemDictionaryShared::apply_saved_merge_crc(ik)) {
-          log_debug(aot, merge)("  applied saved CRC for %s", ik->external_name());
-        } else {
-          log_warning(aot, merge)("  no CRC info available for unregistered class %s", ik->external_name());
-        }
-      }
-    }
-  }
-
   log_info(aot, merge)("Dumping merged AOT cache to %s", AOTCacheOutput);
   CDSConfig::DumperThreadMark dumper_thread_mark(current);
   StaticArchiveBuilder builder;
