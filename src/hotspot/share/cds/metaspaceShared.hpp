@@ -151,6 +151,8 @@ public:
 
   // Allocate a block of memory from the temporary "symbol" region.
   static char* symbol_space_alloc(size_t num_bytes);
+  // This ensures that symbols are not allocated on archive
+  static bool  symbol_space_is_allocatable();
 
   // This is the base address as specified by -XX:SharedBaseAddress during -Xshare:dump.
   // Both the base/top archives are written using this as their base address.

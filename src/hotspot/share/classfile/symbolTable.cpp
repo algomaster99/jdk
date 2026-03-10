@@ -176,7 +176,7 @@ private:
   static void* allocate_node_impl(size_t size, Value const& value) {
     size_t alloc_size = SymbolTableHash::get_dynamic_node_size(value.byte_size());
 #if INCLUDE_CDS
-    if (CDSConfig::is_dumping_static_archive()) {
+    if (CDSConfig::is_dumping_static_archive() && MetaspaceShared::symbol_space_is_allocatable()) {
       MutexLocker ml(DumpRegion_lock, Mutex::_no_safepoint_check_flag);
       // To get deterministic output from -Xshare:dump, we ensure that Symbols are allocated in
       // increasing addresses. When the symbols are copied into the archive, we preserve their

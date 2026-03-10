@@ -143,6 +143,10 @@ char* MetaspaceShared::symbol_space_alloc(size_t num_bytes) {
   return _symbol_region.allocate(num_bytes);
 }
 
+bool MetaspaceShared::symbol_space_is_allocatable() {
+  return _symbol_region.is_allocatable();
+}
+
 // os::vm_allocation_granularity() is usually 4K for most OSes. However, some platforms
 // such as linux-aarch64 and macos-x64 ...
 // it can be either 4K or 64K and on macos-aarch64 it is 16K. To generate archives that are
