@@ -42,6 +42,7 @@
 #include "oops/objArrayKlass.hpp"
 #include "runtime/arguments.hpp"
 #include "utilities/classpathStream.hpp"
+#include "utilities/zipLibrary.hpp"
 #include "utilities/formatBuffer.hpp"
 #include "utilities/stringUtils.hpp"
 
@@ -1030,6 +1031,134 @@ bool AOTClassLocationConfig::validate(const char* cache_filename, bool has_aot_l
     }
   }
   return success;
+}
+
+bool AOTClassLocationConfig::is_archived_class_visible_on_classpath(int shared_classpath_index) {
+  // Access the archived config to determine class origin.
+  // Use _runtime_instance if available, otherwise fall back to FileMapInfo.
+  const AOTClassLocationConfig* archived_config = _runtime_instance;
+  if (archived_config == nullptr) {
+    FileMapInfo* mapinfo = FileMapInfo::current_info();
+    if (mapinfo == nullptr) {
+      return true;
+    }
+    archived_config = mapinfo->header()->class_location_config();
+    if (archived_config == nullptr) {
+      return true;
+    }
+  }
+
+  // Boot/platform classes are always visible (from modules image)
+  if (shared_classpath_index < archived_config->app_cp_start_index()) {
+    return true;
+  }
+
+  // Bounds check: in merged caches, classes from input archives may have classpath
+  // indices that exceed the merged config's entries. These classes are still in the
+  // archive but should not be loaded since their source JAR is unknown in this config.
+  int num_locations = archived_config->class_locations()->length();
+  if (shared_classpath_index >= num_locations) {
+    log_info(class, path)("Archived class not visible: classpath index %d exceeds config size %d",
+                          shared_classpath_index, num_locations);
+    return false;
+  }
+
+  // Module path classes: allow for now
+  if (shared_classpath_index >= archived_config->app_cp_end_index()) {
+    return true;
+  }
+
+  // App classpath class: check if the source JAR exists on the current classpath
+  const AOTClassLocation* loc = archived_config->class_location_at(shared_classpath_index);
+  const char* archived_path = loc->path();
+
+  const char* current_app_cp = Arguments::get_appclasspath();
+  if (current_app_cp == nullptr || current_app_cp[0] == '\0') {
+    log_debug(class, path)("Archived class from %s not visible: empty app classpath", archived_path);
+    return false;
+  }
+
+  // Parse and check each entry in the current app classpath
+  const char* start = current_app_cp;
+  while (*start != '\0') {
+    const char* end = strchr(start, os::path_separator()[0]);
+    size_t len = (end != nullptr) ? (size_t)(end - start) : strlen(start);
+    if (len > 0) {
+      char entry[JVM_MAXPATHLEN];
+      if (len < sizeof(entry)) {
+        memcpy(entry, start, len);
+        entry[len] = '\0';
+        if (os::same_files(archived_path, entry)) {
+          return true;
+        }
+      }
+    }
+    if (end == nullptr) break;
+    start = end + 1;
+  }
+
+  log_debug(class, path)("Archived class from %s: source JAR not on current classpath (will check by class name)", archived_path);
+  return false;
+}
+
+bool AOTClassLocationConfig::is_class_in_current_classpath(const char* class_name) {
+  const char* current_app_cp = Arguments::get_appclasspath();
+  if (current_app_cp == nullptr || current_app_cp[0] == '\0') {
+    return false;
+  }
+
+  // Build .class file path from internal class name (e.g., "org/foo/Bar" -> "org/foo/Bar.class")
+  size_t name_len = strlen(class_name);
+  size_t path_len = name_len + 6 + 1; // ".class" + null
+  if (path_len > JVM_MAXPATHLEN) return false;
+
+  char class_file[JVM_MAXPATHLEN];
+  memcpy(class_file, class_name, name_len);
+  memcpy(class_file + name_len, ".class", 7); // includes null terminator
+
+  const char* start = current_app_cp;
+  while (*start != '\0') {
+    const char* end = strchr(start, os::path_separator()[0]);
+    size_t len = (end != nullptr) ? (size_t)(end - start) : strlen(start);
+    if (len > 0 && len < JVM_MAXPATHLEN) {
+      char entry[JVM_MAXPATHLEN];
+      memcpy(entry, start, len);
+      entry[len] = '\0';
+
+      struct stat st;
+      if (os::stat(entry, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) {
+          // Directory: check if class file exists
+          char full_path[JVM_MAXPATHLEN];
+          int written = snprintf(full_path, sizeof(full_path), "%s/%s", entry, class_file);
+          if (written > 0 && (size_t)written < sizeof(full_path)) {
+            struct stat file_st;
+            if (os::stat(full_path, &file_st) == 0) {
+              return true;
+            }
+          }
+        } else {
+          // JAR: check if class file entry exists
+          char* pmsg = nullptr;
+          jzfile* zip = (jzfile*)ZipLibrary::open(entry, &pmsg);
+          if (zip != nullptr) {
+            jint size = 0;
+            jint name_len_out = 0;
+            jzentry* ze = ZipLibrary::find_entry(zip, class_file, &size, &name_len_out);
+            if (ze != nullptr) {
+              ZipLibrary::free_entry(zip, ze);
+              ZipLibrary::close(zip);
+              return true;
+            }
+            ZipLibrary::close(zip);
+          }
+        }
+      }
+    }
+    if (end == nullptr) break;
+    start = end + 1;
+  }
+  return false;
 }
 
 void AOTClassLocationConfig::log_locations(const char* cache_filename, bool is_write) const {

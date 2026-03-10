@@ -24,6 +24,7 @@
 
 #include "cds/aotClassInitializer.hpp"
 #include "cds/aotClassLinker.hpp"
+#include "cds/aotClassLocation.hpp"
 #include "cds/aotLinkedClassBulkLoader.hpp"
 #include "cds/aotLinkedClassTable.hpp"
 #include "cds/cdsConfig.hpp"
@@ -179,6 +180,34 @@ void AOTLinkedClassBulkLoader::load_classes_impl(AOTLinkedClassCategory class_ca
 
   for (int i = 0; i < classes->length(); i++) {
     InstanceKlass* ik = classes->at(i);
+
+    // If some classes are not on classpath, then avoid loading it from archive
+    // For example, a surefire class would never be invoked anyway in production eventhough
+    // it is in the archive.
+    if (class_category == AOTLinkedClassCategory::APP && !ik->is_loaded()
+        && !CDSConfig::is_dumping_final_static_archive()) {
+      if (ik->is_hidden()) {
+        // Hidden classes (lambda proxies) depend on their nest host. If the nest
+        // host was skipped, we must skip the hidden class too to avoid crashes.
+        if (HeapShared::is_lambda_proxy_klass(ik)) {
+          InstanceKlass* nest_host = ik->nest_host_not_null();
+          if (!nest_host->is_loaded()) {
+            ResourceMark rm(THREAD);
+            log_info(aot, load)("%-5s %s (skipped: nest host not loaded)", category_name, ik->external_name());
+            continue;
+          }
+        }
+      } else if (!AOTClassLocationConfig::is_archived_class_visible_on_classpath(ik->shared_classpath_index())) {
+        // Path didn't match — check if the class file exists on the classpath (fat JAR case)
+        ResourceMark rm(THREAD);
+        const char* class_name = ik->name()->as_C_string();
+        if (!AOTClassLocationConfig::is_class_in_current_classpath(class_name)) {
+          log_info(aot, load)("%-5s %s (skipped: not on current classpath)", category_name, ik->external_name());
+          continue;
+        }
+      }
+    }
+
     if (log_is_enabled(Info, aot, load)) {
       ResourceMark rm(THREAD);
       log_info(aot, load)("%-5s %s%s%s", category_name, ik->external_name(),

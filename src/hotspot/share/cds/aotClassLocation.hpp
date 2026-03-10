@@ -269,6 +269,18 @@ public:
 
   AOTClassLocationConfig* write_to_archive() const;
 
+  static bool has_runtime_instance() {
+    return _runtime_instance != nullptr;
+  }
+
+  // Takes in the index of jar in the classpath and then tries to find it
+  // If it is not there, then we fallback to is_class_in_current_classpath
+  static bool is_archived_class_visible_on_classpath(int shared_classpath_index);
+
+  // We construct class name org/apache/fontbox/ttf/TrueTypeFont -> org/apache/fontbox/ttf/TrueTypeFont.class
+  // and then look for it in the jars
+  static bool is_class_in_current_classpath(const char* class_name);
+
   // Functions used only during runtime
   bool validate(const char* cache_filename, bool has_aot_linked_classes, bool* has_extra_module_paths) const;
 
