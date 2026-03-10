@@ -689,7 +689,6 @@ void AOTClassLocationConfig::check_nonempty_dirs() const {
     }
     if (cs->is_dir()) {
       if (!os::dir_is_empty(cs->path())) {
-        aot_log_error(aot)("Error: non-empty directory '%s'", cs->path());
         has_nonempty_dir = true;
       }
     }
