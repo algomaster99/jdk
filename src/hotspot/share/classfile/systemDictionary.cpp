@@ -944,7 +944,21 @@ bool SystemDictionary::is_shared_class_visible(Symbol* class_name,
     }
   }
 
-  // (2) Check if we are loading into the same module from the same location as in dump time.
+  // (2) Check if the class's source JAR is on the current classpath, or if the
+  //     class file exists in a current classpath entry (fat JAR case). This prevents
+  //     loading cached classes whose dependencies aren't available.
+  if (!CDSConfig::is_dumping_final_static_archive() &&
+      ik->defined_by_app_loader() && !ik->is_hidden() &&
+      !AOTClassLocationConfig::is_archived_class_visible_on_classpath(ik->shared_classpath_index())) {
+    // Path didn't match — check if the class file exists on the classpath
+    ResourceMark rm;
+    const char* cname = ik->name()->as_C_string();
+    if (!AOTClassLocationConfig::is_class_in_current_classpath(cname)) {
+      return false;
+    }
+  }
+
+  // (3) Check if we are loading into the same module from the same location as in dump time.
 
   if (CDSConfig::is_using_optimized_module_handling()) {
     // Class visibility has not changed between dump time and run time, so a class
