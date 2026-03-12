@@ -1100,9 +1100,65 @@ bool AOTClassLocationConfig::is_archived_class_visible_on_classpath(int shared_c
   return false;
 }
 
-bool AOTClassLocationConfig::is_class_in_current_classpath(const char* class_name) {
+// Cached classpath entries for is_class_in_current_classpath().
+// Avoids re-opening JAR files on every call.
+struct CachedCPEntry {
+  char path[JVM_MAXPATHLEN];
+  bool is_dir;
+  jzfile* zip;  // non-null only for JAR files
+};
+static CachedCPEntry* _cached_cp_entries = nullptr;
+static int _cached_cp_entry_count = 0;
+
+static void init_cached_cp_entries() {
+  if (_cached_cp_entries != nullptr) return;
+
   const char* current_app_cp = Arguments::get_appclasspath();
-  if (current_app_cp == nullptr || current_app_cp[0] == '\0') {
+  if (current_app_cp == nullptr || current_app_cp[0] == '\0') return;
+
+  // Count entries first
+  int count = 0;
+  const char* s = current_app_cp;
+  while (*s != '\0') {
+    count++;
+    const char* e = strchr(s, os::path_separator()[0]);
+    if (e == nullptr) break;
+    s = e + 1;
+  }
+
+  _cached_cp_entries = NEW_C_HEAP_ARRAY(CachedCPEntry, count, mtClassShared);
+  _cached_cp_entry_count = 0;
+
+  s = current_app_cp;
+  while (*s != '\0') {
+    const char* e = strchr(s, os::path_separator()[0]);
+    size_t len = (e != nullptr) ? (size_t)(e - s) : strlen(s);
+    if (len > 0 && len < JVM_MAXPATHLEN) {
+      CachedCPEntry* entry = &_cached_cp_entries[_cached_cp_entry_count];
+      memcpy(entry->path, s, len);
+      entry->path[len] = '\0';
+      entry->zip = nullptr;
+      entry->is_dir = false;
+
+      struct stat st;
+      if (os::stat(entry->path, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) {
+          entry->is_dir = true;
+        } else {
+          char* pmsg = nullptr;
+          entry->zip = (jzfile*)ZipLibrary::open(entry->path, &pmsg);
+        }
+        _cached_cp_entry_count++;
+      }
+    }
+    if (e == nullptr) break;
+    s = e + 1;
+  }
+}
+
+bool AOTClassLocationConfig::is_class_in_current_classpath(const char* class_name) {
+  init_cached_cp_entries();
+  if (_cached_cp_entries == nullptr || _cached_cp_entry_count == 0) {
     return false;
   }
 
@@ -1115,47 +1171,28 @@ bool AOTClassLocationConfig::is_class_in_current_classpath(const char* class_nam
   memcpy(class_file, class_name, name_len);
   memcpy(class_file + name_len, ".class", 7); // includes null terminator
 
-  const char* start = current_app_cp;
-  while (*start != '\0') {
-    const char* end = strchr(start, os::path_separator()[0]);
-    size_t len = (end != nullptr) ? (size_t)(end - start) : strlen(start);
-    if (len > 0 && len < JVM_MAXPATHLEN) {
-      char entry[JVM_MAXPATHLEN];
-      memcpy(entry, start, len);
-      entry[len] = '\0';
-
-      struct stat st;
-      if (os::stat(entry, &st) == 0) {
-        if (S_ISDIR(st.st_mode)) {
-          // Directory: check if class file exists
-          char full_path[JVM_MAXPATHLEN];
-          int written = snprintf(full_path, sizeof(full_path), "%s/%s", entry, class_file);
-          if (written > 0 && (size_t)written < sizeof(full_path)) {
-            struct stat file_st;
-            if (os::stat(full_path, &file_st) == 0) {
-              return true;
-            }
-          }
-        } else {
-          // JAR: check if class file entry exists
-          char* pmsg = nullptr;
-          jzfile* zip = (jzfile*)ZipLibrary::open(entry, &pmsg);
-          if (zip != nullptr) {
-            jint size = 0;
-            jint name_len_out = 0;
-            jzentry* ze = ZipLibrary::find_entry(zip, class_file, &size, &name_len_out);
-            if (ze != nullptr) {
-              ZipLibrary::free_entry(zip, ze);
-              ZipLibrary::close(zip);
-              return true;
-            }
-            ZipLibrary::close(zip);
-          }
+  for (int i = 0; i < _cached_cp_entry_count; i++) {
+    CachedCPEntry* cp_entry = &_cached_cp_entries[i];
+    if (cp_entry->is_dir) {
+      // Directory: check if class file exists
+      char full_path[JVM_MAXPATHLEN];
+      int written = snprintf(full_path, sizeof(full_path), "%s/%s", cp_entry->path, class_file);
+      if (written > 0 && (size_t)written < sizeof(full_path)) {
+        struct stat file_st;
+        if (os::stat(full_path, &file_st) == 0) {
+          return true;
         }
       }
+    } else if (cp_entry->zip != nullptr) {
+      // JAR: check if class file entry exists using cached handle
+      jint size = 0;
+      jint name_len_out = 0;
+      jzentry* ze = ZipLibrary::find_entry(cp_entry->zip, class_file, &size, &name_len_out);
+      if (ze != nullptr) {
+        ZipLibrary::free_entry(cp_entry->zip, ze);
+        return true;
+      }
     }
-    if (end == nullptr) break;
-    start = end + 1;
   }
   return false;
 }
