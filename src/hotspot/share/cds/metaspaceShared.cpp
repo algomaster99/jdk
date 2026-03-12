@@ -2245,6 +2245,12 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
     classes_for_merged_aot_cache.append(newly_loaded_classes.at(i));
   }
 
+  // Build a hash set of newly loaded class names for O(1) deduplication lookups
+  ResourceHashtable<Symbol*, bool, 1024, AnyObj::RESOURCE_AREA, mtClassShared> new_class_names;
+  for (int i = 0; i < newly_loaded_classes.length(); i++) {
+    new_class_names.put(newly_loaded_classes.at(i)->name(), true);
+  }
+
   for (int i = 0; i < archived.length(); i++) {
     if (archived.at(i)->is_hidden()) {
       continue;
