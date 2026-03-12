@@ -144,7 +144,13 @@ void FinalImageRecipes::apply_recipes_for_constantpool(JavaThread* current) {
     Array<int>* cp_indices = _cp_recipes->at(i);
     int flags = _cp_flags->at(i);
     if (cp_indices != nullptr) {
-      InstanceKlass* ik = InstanceKlass::cast(_all_klasses->at(i));
+      // Use live class pointer if available (merge flow); skip classes that failed to load/link.
+      if (_live_klasses != nullptr && _live_klasses->at(i) == nullptr) {
+        continue;
+      }
+      InstanceKlass* ik = (_live_klasses != nullptr)
+                          ? _live_klasses->at(i)
+                          : InstanceKlass::cast(_all_klasses->at(i));
       if (ik->is_loaded()) {
         ResourceMark rm(current);
         ConstantPool* cp = ik->constants();
@@ -169,7 +175,11 @@ void FinalImageRecipes::apply_recipes_for_constantpool(JavaThread* current) {
 void FinalImageRecipes::load_all_classes(TRAPS) {
   assert(CDSConfig::is_dumping_final_static_archive(), "sanity");
   Handle class_loader(THREAD, SystemDictionary::java_system_loader());
-  for (int i = 0; i < _all_klasses->length(); i++) {
+
+  int len = _all_klasses->length();
+  _live_klasses = new (mtClassShared) GrowableArray<InstanceKlass*>(len, len, nullptr, mtClassShared);
+
+  for (int i = 0; i < len; i++) {
     Klass* k = _all_klasses->at(i);
     if (k->is_instance_klass()) {
       InstanceKlass* ik = InstanceKlass::cast(k);
@@ -177,17 +187,41 @@ void FinalImageRecipes::load_all_classes(TRAPS) {
         SystemDictionaryShared::init_dumptime_info(ik);
         SystemDictionaryShared::add_unregistered_class(THREAD, ik);
         SystemDictionaryShared::copy_unregistered_class_size_and_crc32(ik);
+        _live_klasses->at_put(i, ik);
       } else if (!ik->is_hidden()) {
-        Klass* actual = SystemDictionary::resolve_or_fail(ik->name(), class_loader, true, CHECK);
-        if (actual != ik) {
+        // In a merge flow, some classes from input AOT caches may not exist on the
+        // current classpath. Use THREAD to catch exceptions and skip missing classes
+        // gracefully instead of aborting the assembly.
+        Klass* actual = SystemDictionary::resolve_or_null(ik->name(), class_loader, THREAD);
+        if (HAS_PENDING_EXCEPTION) {
           ResourceMark rm(THREAD);
-          log_error(aot)("Unable to resolve class from CDS archive: %s", ik->external_name());
-          log_error(aot)("Expected: " INTPTR_FORMAT ", actual: " INTPTR_FORMAT, p2i(ik), p2i(actual));
-          log_error(aot)("Please check if your VM command-line is the same as in the training run");
-          MetaspaceShared::unrecoverable_writing_error();
+          log_info(aot, load)("Skipping %s (resolution failed)", ik->external_name());
+          CLEAR_PENDING_EXCEPTION;
+          continue;
         }
-        assert(ik->is_loaded(), "must be");
-        ik->link_class(CHECK);
+        if (actual == nullptr) {
+          ResourceMark rm(THREAD);
+          log_info(aot, load)("Skipping %s (not found on current classpath)", ik->external_name());
+          continue;
+        }
+        // In a normal record→create flow, actual == ik because Phase 2 maps the preimage and
+        // resolves the class directly from the archive at the same address.
+        //
+        // In a merge→create flow, some classes in _all_klasses came from an input AOT cache
+        // that is NOT mapped in Phase 2. resolve_or_fail loads them fresh from the classpath,
+        // so actual != ik. In that case link `actual` (the live class), not `ik` (the archived
+        // preimage copy which has had remove_unshareable_info() called on it, clearing
+        // _init_lock and other fields).
+        InstanceKlass* to_link = (actual != ik) ? InstanceKlass::cast(actual) : ik;
+        assert(to_link->is_loaded(), "must be");
+        to_link->link_class(THREAD);
+        if (HAS_PENDING_EXCEPTION) {
+          ResourceMark rm(THREAD);
+          log_info(aot, load)("Skipping %s (linking failed, dependency not on classpath)", to_link->external_name());
+          CLEAR_PENDING_EXCEPTION;
+          continue;
+        }
+        _live_klasses->at_put(i, to_link);
       }
     }
   }

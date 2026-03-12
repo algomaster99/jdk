@@ -50,12 +50,14 @@ class FinalImageRecipes {
   // into the final image.
   Array<Klass*>* _all_klasses;
 
+  GrowableArray<InstanceKlass*>* _live_klasses;
+
   // For each klass k _all_klasses->at(i), _cp_recipes->at(i) lists all the {klass,field,method,indy}
   // cp indices that were resolved for k during the training run.
   Array<Array<int>*>* _cp_recipes;
   Array<int>* _cp_flags;
 
-  FinalImageRecipes() : _all_klasses(nullptr), _cp_recipes(nullptr), _cp_flags(nullptr) {}
+  FinalImageRecipes() : _all_klasses(nullptr), _live_klasses(nullptr), _cp_recipes(nullptr), _cp_flags(nullptr) {}
 
   void* operator new(size_t size) throw();
 
