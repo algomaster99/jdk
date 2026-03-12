@@ -2234,6 +2234,8 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
     if (newly_loaded_classes.at(i)->is_hidden()) {
       continue;
     }
+    // TODO: find a better way to fix proxy classes
+    // Its shared_classpath_index is not -1 based on some tests
     // Skip dynamically generated proxy classes created at runtime (e.g. jdk/proxy1/$Proxy1).
     // They cannot be loaded from any JAR in Phase 2, and their ConstantPools may reference
     // other proxy classes that have no DumpTimeClassInfo, causing crashes in is_excluded().
@@ -2255,16 +2257,20 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
     if (archived.at(i)->is_hidden()) {
       continue;
     }
-    bool already_in_new_classes = false;
-    for (int j = 0; j < newly_loaded_classes.length(); j++) {
-      // Not sure if this is possible though
-      // TODO: check if there are class collisions between archived and newly_loaded_classes
-      if (strcmp(archived.at(i)->external_name(), newly_loaded_classes.at(j)->external_name()) == 0) {
-        already_in_new_classes = true;
-        break;
+    if (strstr(archived.at(i)->external_name(), "junit/") != nullptr ||
+    strstr(archived.at(i)->external_name(), "surefire/") != nullptr) {
+      log_debug(aot, merge)("  skipping archived class with junit/surefire in name: %s", archived.at(i)->external_name());
+      continue;
+    }
+    // Skip archived classes whose jars are not on the current classpath
+    if (archived.at(i)->is_instance_klass()) {
+      InstanceKlass* ik = InstanceKlass::cast(archived.at(i));
+      if (ik->shared_classpath_index() == UNREGISTERED_INDEX && !ik->defined_by_other_loaders()) {
+        log_debug(aot, merge)("  skipping excluded archived class: %s", ik->external_name());
+        continue;
       }
     }
-    if (already_in_new_classes) {
+    if (new_class_names.contains(archived.at(i)->name())) {
       continue;
     }
     classes_for_merged_aot_cache.append(archived.at(i));
