@@ -557,15 +557,25 @@ void* AOTCodeEntry::operator new(size_t x, AOTCodeCache* cache) {
   return (void*)(cache->add_entry());
 }
 
-static bool check_entry(AOTCodeEntry::Kind kind, uint id, AOTCodeEntry* entry) {
+static bool check_entry(AOTCodeEntry::Kind kind, uint id, AOTCodeEntry* entry,
+                        const char* name, const char* cache_buffer) {
   if (entry->kind() == kind) {
     assert(entry->id() == id, "sanity");
+    // When a name is provided, also verify it matches the stored name.
+    // This handles hash collisions where two different names map to the same id.
+    if (name != nullptr && cache_buffer != nullptr) {
+      uint name_offset = entry->offset() + entry->name_offset();
+      const char* stored_name = cache_buffer + name_offset;
+      if (strncmp(stored_name, name, entry->name_size() - 1) != 0) {
+        return false; // Same kind+id but different name — hash collision
+      }
+    }
     return true; // Found
   }
   return false;
 }
 
-AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
+AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id, const char* name) {
   assert(_for_use, "sanity");
   uint count = _load_header->entries_count();
   if (_load_entries == nullptr) {
@@ -574,6 +584,7 @@ AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
     _load_entries = (AOTCodeEntry*)(_search_entries + 2 * count);
     log_debug(aot, codecache, init)("Read %d entries table at offset %d from AOT Code Cache", count, _load_header->entries_offset());
   }
+  const char* buf = (name != nullptr) ? _load_buffer : nullptr;
   // Binary search
   int l = 0;
   int h = count - 1;
@@ -584,10 +595,10 @@ AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
     if (is == id) {
       int index = _search_entries[ix + 1];
       AOTCodeEntry* entry = &(_load_entries[index]);
-      if (check_entry(kind, id, entry)) {
+      if (check_entry(kind, id, entry, name, buf)) {
         return entry; // Found
       }
-      // Linear search around to handle id collission
+      // Linear search around to handle id collision
       for (int i = mid - 1; i >= l; i--) { // search back
         ix = i * 2;
         is = _search_entries[ix];
@@ -596,7 +607,7 @@ AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
         }
         index = _search_entries[ix + 1];
         AOTCodeEntry* entry = &(_load_entries[index]);
-        if (check_entry(kind, id, entry)) {
+        if (check_entry(kind, id, entry, name, buf)) {
           return entry; // Found
         }
       }
@@ -608,7 +619,7 @@ AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
         }
         index = _search_entries[ix + 1];
         AOTCodeEntry* entry = &(_load_entries[index]);
-        if (check_entry(kind, id, entry)) {
+        if (check_entry(kind, id, entry, name, buf)) {
           return entry; // Found
         }
       }
@@ -869,7 +880,7 @@ CodeBlob* AOTCodeCache::load_code_blob(AOTCodeEntry::Kind entry_kind, uint id, c
   }
   log_debug(aot, codecache, stubs)("Reading blob '%s' (id=%u, kind=%s) from AOT Code Cache", name, id, aot_code_entry_kind_name[entry_kind]);
 
-  AOTCodeEntry* entry = cache->find_entry(entry_kind, encode_id(entry_kind, id));
+  AOTCodeEntry* entry = cache->find_entry(entry_kind, encode_id(entry_kind, id), name);
   if (entry == nullptr) {
     return nullptr;
   }

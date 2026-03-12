@@ -315,7 +315,7 @@ public:
     return _store_entries;
   }
 
-  AOTCodeEntry* find_entry(AOTCodeEntry::Kind kind, uint id);
+  AOTCodeEntry* find_entry(AOTCodeEntry::Kind kind, uint id, const char* name = nullptr);
 
   bool finish_write();
 
