@@ -1085,16 +1085,39 @@ static int exec_jvm_with_java_tool_options(const char* java_launcher_path, TRAPS
   HandleMark hm(THREAD);
   GrowableArray<Handle> args;
 
-  const char* cp = Arguments::get_appclasspath();
-  if (cp != nullptr && strlen(cp) > 0 && strcmp(cp, ".") != 0) {
-    // We cannot use "-cp", because "-cp" is only interpreted by the java launcher,
-    // and is not interpreter by arguments.cpp when it loads args from JAVA_TOOL_OPTIONS
-    stringStream ss;
-    ss.print("-Djava.class.path=");
-    ss.print_raw(cp);
-    append_args(&args, ss.freeze(), CHECK_0);
-    // CDS$ProcessLauncher::execWithJavaToolOptions() must unset CLASSPATH, which has
-    // a higher priority than -Djava.class.path=
+  // Build the classpath for the child process. We use the already-expanded dumptime
+  // classpath (AOTClassLocationConfig::dumptime()) rather than the raw appclasspath
+  // from Arguments::get_appclasspath(). The dumptime config was built with
+  // parse_manifest=true, so it has already expanded any Class-Path manifest entries
+  // (e.g. surefirebooter.jar -> fontbox.jar, pdfbox-io.jar, ...). Passing the
+  // unexpanded surefirebooter.jar via -Djava.class.path would not expand the manifest,
+  // so Phase 2 would fail to load classes from the transitive JARs.
+  //
+  // We cannot use "-cp" because it is only interpreted by the java launcher and not
+  // by arguments.cpp when loading args from JAVA_TOOL_OPTIONS.
+  if (AOTClassLocationConfig::dumptime_is_ready()) {
+    const AOTClassLocationConfig* cl_config = AOTClassLocationConfig::dumptime();
+    int app_start = cl_config->app_cp_start_index();
+    int app_end   = cl_config->app_cp_end_index();
+    if (app_end > app_start) {
+      stringStream ss;
+      ss.print("-Djava.class.path=");
+      for (int i = app_start; i < app_end; i++) {
+        if (i > app_start) ss.print_raw(os::path_separator());
+        ss.print_raw(cl_config->class_location_at(i)->path());
+      }
+      append_args(&args, ss.freeze(), CHECK_0);
+      // CDS$ProcessLauncher::execWithJavaToolOptions() must unset CLASSPATH, which has
+      // higher priority than -Djava.class.path=
+    }
+  } else {
+    const char* cp = Arguments::get_appclasspath();
+    if (cp != nullptr && strlen(cp) > 0 && strcmp(cp, ".") != 0) {
+      stringStream ss;
+      ss.print("-Djava.class.path=");
+      ss.print_raw(cp);
+      append_args(&args, ss.freeze(), CHECK_0);
+    }
   }
 
   // Pass all arguments. These include those from JAVA_TOOL_OPTIONS and _JAVA_OPTIONS.
@@ -2302,6 +2325,9 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
   if (status) {
     tty->print_cr("%s AOTConfiguration recorded: %s",
                   CDSConfig::has_temp_aot_config_file() ? "Temporary" : "", AOTConfiguration);
+
+    // crashes without this because I assume we want to load the classes again during assembly phase
+    UseSharedSpaces = false;
     fork_and_dump_final_static_archive(CHECK);
   } else {
     log_error(aot, merge)("Merged preimage dump failed");
