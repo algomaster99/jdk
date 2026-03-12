@@ -85,8 +85,17 @@ bool AOTConstantPoolResolver::is_class_resolution_deterministic(InstanceKlass* c
   if (resolved_class->is_instance_klass()) {
     InstanceKlass* ik = InstanceKlass::cast(resolved_class);
 
-    if (!ik->is_shared() && SystemDictionaryShared::is_excluded_class(ik)) {
-      return false;
+     if (!ik->is_shared()) {
+      // In merge mode, only classes explicitly added to classes_for_merged_aot_cache have a
+      // DumpTimeClassInfo. A class reachable only via ConstantPool resolution (e.g.
+      // java.lang.reflect.Proxy referenced by a method entry) may have no entry
+      if (CDSConfig::is_merging_aot_cache() &&
+          SystemDictionaryShared::dumptime_table()->get(ik) == nullptr) {
+        return false;
+      }
+      if (SystemDictionaryShared::is_excluded_class(ik)) {
+        return false;
+      }
     }
 
     if (cp_holder->is_subtype_of(ik)) {
