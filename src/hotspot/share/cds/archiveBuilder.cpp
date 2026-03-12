@@ -521,6 +521,17 @@ bool ArchiveBuilder::is_excluded(Klass* klass) {
       }
       return info->is_excluded();
     }
+    if (CDSConfig::is_merging_aot_cache()) {
+      // In merge mode a class reachable via ConstantPool pointer-following (e.g. a
+      // dynamically generated proxy class referenced by Proxy$ProxyBuilder) may have no
+      // DumpTimeClassInfo if it was excluded from classes_for_merged_aot_cache before
+      // init_dumptime_info() was called. Treat it as excluded so the pointer is set_to_null
+      // rather than crashing in get_info_locked() with a null DumpTimeClassInfo.
+      DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(ik);
+      if (info == nullptr) {
+        return true;
+      }
+    }
     return SystemDictionaryShared::is_excluded_class(ik);
   } else if (klass->is_objArray_klass()) {
     Klass* bottom = ObjArrayKlass::cast(klass)->bottom_klass();
@@ -535,6 +546,12 @@ bool ArchiveBuilder::is_excluded(Klass* klass) {
           info = SystemDictionaryShared::dumptime_table()->allocate_info(bottom_ik);
         }
         return info->is_excluded();
+      }
+      if (CDSConfig::is_merging_aot_cache()) {
+        DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(bottom_ik);
+        if (info == nullptr) {
+          return true;
+        }
       }
       return SystemDictionaryShared::is_excluded_class(bottom_ik);
     }
