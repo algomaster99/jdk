@@ -1102,18 +1102,19 @@ static int exec_jvm_with_java_tool_options(const char* java_launcher_path, TRAPS
     const char* arg = Arguments::jvm_args_array()[i];
     if (strstr(arg, "-XX:AOTCacheOutput=") == arg || // arg starts with ...
         strstr(arg, "-XX:AOTConfiguration=") == arg ||
-        strstr(arg, "-XX:AOTMode=") == arg) {
+        strstr(arg, "-XX:AOTMode=") == arg ||
+        strstr(arg, "-XX:AOTCache=") == arg) {
       // Filter these out. They wiill be set below.
     } else {
       append_args(&args, arg, CHECK_0);
     }
   }
 
-  // Note: because we are running in AOTMode=record, JDK_AOT_VM_OPTIONS have not been
-  // parsed, so they are not in Arguments::jvm_args_array. If JDK_AOT_VM_OPTIONS is in
-  // the environment, it will be inherited and parsed by the child JVM process
+  // Note: because we are running in AOTMode=record (or merge), JDK_AOT_VM_OPTIONS have
+  // not been parsed, so they are not in Arguments::jvm_args_array. If JDK_AOT_VM_OPTIONS
+  // is in the environment, it will be inherited and parsed by the child JVM process
   // in Arguments::parse_java_tool_options_environment_variable().
-  precond(strcmp(AOTMode, "record") == 0);
+  precond(strcmp(AOTMode, "record") == 0 || strcmp(AOTMode, "merge") == 0);
 
   // We don't pass Arguments::jvm_flags_array(), as those will be added by
   // the child process when it loads .hotspotrc
@@ -2128,7 +2129,7 @@ void MetaspaceShared::collect_loaded_classes_for_merge(GrowableArray<InstanceKla
   to_be_merged_classes->appendAll(&new_classes);
 }
 
-void MetaspaceShared::start_merging_aot_cache() {
+void MetaspaceShared::start_merging_aot_cache(TRAPS) {
   if (!CDSConfig::is_merging_aot_cache()) {
     return;
   }
@@ -2156,15 +2157,12 @@ void MetaspaceShared::start_merging_aot_cache() {
     log_info(aot, merge)("  region[%d]: used=%zu bytes", i, r->used());
   }
 
-  if (FLAG_IS_DEFAULT(AOTCacheOutput)) {
-    log_error(aot, merge)("Cannot merge: AOTCacheOutput must be specified (or defaulted) in merge mode");
-    return;
-  }
-
-  // Enable dumping so the dump-time machinery (dumptime_table, artifact finder, etc) can be used.
+  // This enables the dumping machinery
   CDSConfig::enable_dumping_static_archive();
-  // Merge-at-runtime happens at VM shutdown. Avoid dumping archived heap objects and module graph.
-  CDSConfig::disable_heap_dumping();
+  // This specifically enables the dumping of the preimage archive (.aot.config)
+  CDSConfig::enable_dumping_preimage_static_archive();
+  CDSConfig::set_output_archive_path(AOTConfiguration);
+
   JavaThread* current = JavaThread::current();
   AOTClassLocationConfig::dumptime_init(current);
   if (current->has_pending_exception()) {
@@ -2174,13 +2172,8 @@ void MetaspaceShared::start_merging_aot_cache() {
   SystemDictionaryShared::initialize();
   AOTClassLinker::initialize();
 
-
-  // Seed dumptime_table with all classes that exist in the input AOT cache, including those
-  // that may never have been loaded during this run.
   GrowableArray<Klass*> archived;
   SystemDictionaryShared::get_all_archived_classes(true, &archived);
-
-
   log_info(aot, merge)("Found %d classes in archived dictionaries", archived.length());
 
   // Add loaded from classfiles during this run.
@@ -2191,7 +2184,7 @@ void MetaspaceShared::start_merging_aot_cache() {
   for (int i = 0; i < newly_loaded_classes.length(); i++) {
     InstanceKlass* ik = newly_loaded_classes.at(i);
     if (ik->shared_classpath_index() != -1 || ik->is_hidden()) {
-      continue; // already has a valid index, or is hidden (handled separately)
+      continue;
     }
     oop loader = ik->class_loader();
     if (loader == nullptr) {
@@ -2201,7 +2194,6 @@ void MetaspaceShared::start_merging_aot_cache() {
       log_debug(aot, merge)("  assigned classpath_index=%d (boot) to %s",
                             classpath_index, ik->external_name());
     } else if (SystemDictionary::is_system_class_loader(loader)) {
-      // App classpath: use the first app classpath entry
       int classpath_index = AOTClassLocationConfig::dumptime()->app_cp_start_index();
       AOTClassLocationConfig::dumptime_set_has_app_classes();
       AOTClassLocationConfig::dumptime_update_max_used_index(classpath_index);
@@ -2209,29 +2201,23 @@ void MetaspaceShared::start_merging_aot_cache() {
       log_debug(aot, merge)("  assigned classpath_index=%d (app) to %s",
                             classpath_index, ik->external_name());
     } else if (SystemDictionary::is_platform_class_loader(loader)) {
-      int classpath_index = 0; // simplified: modules image covers platform classes
+      int classpath_index = 0;
       AOTClassLocationConfig::dumptime_set_has_platform_classes();
       AOTClassLocationConfig::dumptime_update_max_used_index(classpath_index);
       ik->set_shared_classpath_index(classpath_index);
       log_debug(aot, merge)("  assigned classpath_index=%d (platform) to %s",
                             classpath_index, ik->external_name());
     } else {
-      // Custom classloader (e.g., source launcher's MemoryClassLoader).
-      // Mark as UNREGISTERED so the class goes in the unregistered dictionary
-      // and can be matched by CRC at runtime via lookup_from_stream().
       ik->set_shared_classpath_index(UNREGISTERED_INDEX);
       log_debug(aot, merge)("  assigned UNREGISTERED_INDEX to %s (custom loader)",
                             ik->external_name());
     }
   }
 
-  // Make symbols of new classes permanent so they can be archived.
-  // In normal CDS dumps, symbols are permanent by the time archiving starts.
-  // In merge mode, new classes were loaded at runtime and their symbols may be refcounted.
+  // Makes symbol permanent; not sure what that means
   for (int i = 0; i < newly_loaded_classes.length(); i++) {
     InstanceKlass* ik = newly_loaded_classes.at(i);
     ik->name()->make_permanent();
-    // Also make symbols in the constant pool permanent
     ConstantPool* cp = ik->constants();
     for (int j = 1; j < cp->length(); j++) {
       if (cp->tag_at(j).is_utf8()) {
@@ -2256,10 +2242,10 @@ void MetaspaceShared::start_merging_aot_cache() {
       continue;
     }
     bool already_in_new_classes = false;
-    for (int j=0; j < newly_loaded_classes.length(); j++) {
+    for (int j = 0; j < newly_loaded_classes.length(); j++) {
+      // Not sure if this is possible though
+      // TODO: check if there are class collisions between archived and newly_loaded_classes
       if (strcmp(archived.at(i)->external_name(), newly_loaded_classes.at(j)->external_name()) == 0) {
-        // already included
-        // TODO: should probably use a set
         already_in_new_classes = true;
         break;
       }
@@ -2270,12 +2256,11 @@ void MetaspaceShared::start_merging_aot_cache() {
     classes_for_merged_aot_cache.append(archived.at(i));
   }
 
-  log_info(aot, merge)("Total classes to merge %d", classes_for_merged_aot_cache.length());
+  log_info(aot, merge)("Total classes for merged preimage: %d", classes_for_merged_aot_cache.length());
   for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
     log_debug(aot, merge)("class for merged cache %s", classes_for_merged_aot_cache.at(i)->external_name());
   }
 
-  // Initialize dumptime info for all classes in the merged cache
   for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
     Klass* k = classes_for_merged_aot_cache.at(i);
     if (k->is_hidden()) {
@@ -2287,15 +2272,18 @@ void MetaspaceShared::start_merging_aot_cache() {
     }
   }
 
-  log_info(aot, merge)("Dumping merged AOT cache to %s", AOTCacheOutput);
+  log_info(aot, merge)("Dumping merged preimage to %s", AOTConfiguration);
   CDSConfig::DumperThreadMark dumper_thread_mark(current);
   StaticArchiveBuilder builder;
   VM_PopulateDumpSharedSpace op(builder);
   VMThread::execute(&op);
   bool status = write_static_archive(&builder, op.map_info(), op.heap_info());
-  if (!status) {
-    log_error(aot, merge)("Merged AOT cache dump failed");
+
+  if (status) {
+    tty->print_cr("%s AOTConfiguration recorded: %s",
+                  CDSConfig::has_temp_aot_config_file() ? "Temporary" : "", AOTConfiguration);
+    fork_and_dump_final_static_archive(CHECK);
   } else {
-    log_info(aot, merge)("Merged AOT cache written to %s", AOTCacheOutput);
+    log_error(aot, merge)("Merged preimage dump failed");
   }
 }

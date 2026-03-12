@@ -482,13 +482,24 @@ void CDSConfig::check_aotmode_merge() {
 
   FLAG_SET_ERGO_IF_DEFAULT(AOTCacheOutput, "combined.aot");
 
-  // AOTCache should be used
+  // Set up a temporary AOT configuration (preimage) file for the two-phase merge.
+  // Phase 1 (this VM) produces the preimage; Phase 2 (forked child) assembles
+  // the final archive with a clean heap.
+  if (FLAG_IS_DEFAULT(AOTConfiguration)) {
+    size_t len = strlen(AOTCacheOutput) + 10;
+    char* temp = AllocateHeap(len, mtArguments);
+    jio_snprintf(temp, len, "%s.config", AOTCacheOutput);
+    FLAG_SET_ERGO(AOTConfiguration, temp);
+    FreeHeap(temp);
+    _has_temp_aot_config_file = true;
+  }
+  _is_single_command_training = true;
+
   UseSharedSpaces = true;
-  // Fail if the AOTCache cannot be used
   RequireSharedSpaces = true;
 
-  log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s AOTCacheOutput=%s",
-                       AOTCache, AOTCacheOutput);
+  log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s AOTCacheOutput=%s AOTConfiguration=%s",
+                       AOTCache, AOTCacheOutput, AOTConfiguration);
 }
 
 void CDSConfig::check_aotmode_off() {

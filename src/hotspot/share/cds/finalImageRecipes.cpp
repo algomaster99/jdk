@@ -222,8 +222,5 @@ void FinalImageRecipes::apply_recipes_impl(TRAPS) {
 }
 
 void FinalImageRecipes::serialize(SerializeClosure* soc) {
-  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
-    _final_image_recipes = nullptr;
-  }
   soc->do_ptr((void**)&_final_image_recipes);
 }

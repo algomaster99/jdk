@@ -112,6 +112,8 @@ public:
   // static_archive
   static bool is_dumping_static_archive()                    { return CDS_ONLY(_is_dumping_static_archive) NOT_CDS(false); }
   static void enable_dumping_static_archive()                { CDS_ONLY(_is_dumping_static_archive = true); }
+  static void enable_dumping_preimage_static_archive()       { CDS_ONLY(_is_dumping_preimage_static_archive = true); }
+  static void set_output_archive_path(const char* path)      { CDS_ONLY(_output_archive_path = path); }
 
   // A static CDS archive can be dumped in three modes:
   //

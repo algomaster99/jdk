@@ -435,7 +435,7 @@ void before_exit(JavaThread* thread, bool halt) {
   DynamicArchive::dump_at_exit(thread);
   assert(!thread->has_pending_exception(), "must be");
 
-  MetaspaceShared::start_merging_aot_cache();
+  MetaspaceShared::start_merging_aot_cache(thread);
 #endif
 
   // Actual shutdown logic begins here.
@@ -449,7 +449,7 @@ void before_exit(JavaThread* thread, bool halt) {
 #if INCLUDE_CDS
   ClassListWriter::write_resolved_constants();
 
-  if (CDSConfig::is_dumping_preimage_static_archive()) {
+  if (CDSConfig::is_dumping_preimage_static_archive() && !CDSConfig::is_merging_aot_cache()) {
     MetaspaceShared::preload_and_dump(thread);
   }
 #endif

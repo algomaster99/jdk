@@ -136,7 +136,7 @@ public:
   static bool may_be_eagerly_linked(InstanceKlass* ik) NOT_CDS_RETURN_(false);
 
   // AOT cache merging at runtime
-  static void start_merging_aot_cache() NOT_CDS_RETURN;
+  static void start_merging_aot_cache(TRAPS) NOT_CDS_RETURN;
   static void collect_loaded_classes_for_merge(GrowableArray<InstanceKlass*>* new_classes) NOT_CDS_RETURN;
 
 #if INCLUDE_CDS
