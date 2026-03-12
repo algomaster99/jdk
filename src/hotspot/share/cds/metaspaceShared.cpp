@@ -2234,6 +2234,14 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
     if (newly_loaded_classes.at(i)->is_hidden()) {
       continue;
     }
+    // Skip dynamically generated proxy classes created at runtime (e.g. jdk/proxy1/$Proxy1).
+    // They cannot be loaded from any JAR in Phase 2, and their ConstantPools may reference
+    // other proxy classes that have no DumpTimeClassInfo, causing crashes in is_excluded().
+    if (strstr(newly_loaded_classes.at(i)->external_name(), "$Proxy") != nullptr) {
+      log_debug(aot, merge)("  skipping dynamically generated proxy class: %s",
+                            newly_loaded_classes.at(i)->external_name());
+      continue;
+    }
     classes_for_merged_aot_cache.append(newly_loaded_classes.at(i));
   }
 
