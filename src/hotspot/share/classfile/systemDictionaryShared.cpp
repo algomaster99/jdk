@@ -259,6 +259,16 @@ bool SystemDictionaryShared::is_early_klass(InstanceKlass* ik) {
 }
 
 bool SystemDictionaryShared::check_for_exclusion_impl(InstanceKlass* k) {
+  // Exclude test framework classes from all archiving paths — they are not needed at runtime
+  // TODO: maybe a better approach would be to check if their JARs are from test-classes dir in maven project
+  {
+    ResourceMark rm;
+    const char* name = k->external_name();
+    if (strstr(name, "junit.") != nullptr || strstr(name, "surefire.") != nullptr) {
+      return true; // exclude without warning
+    }
+  }
+
   if ((CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache())
       && k->is_shared()) {
     return false; // Do not exclude: shared classes are passed from input archive to merged/final image.

@@ -2280,11 +2280,6 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
     if (archived.at(i)->is_hidden()) {
       continue;
     }
-    if (strstr(archived.at(i)->external_name(), "junit/") != nullptr ||
-    strstr(archived.at(i)->external_name(), "surefire/") != nullptr) {
-      log_debug(aot, merge)("  skipping archived class with junit/surefire in name: %s", archived.at(i)->external_name());
-      continue;
-    }
     // Skip archived classes whose jars are not on the current classpath
     if (archived.at(i)->is_instance_klass()) {
       InstanceKlass* ik = InstanceKlass::cast(archived.at(i));
