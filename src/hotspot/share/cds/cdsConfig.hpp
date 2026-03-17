@@ -27,6 +27,7 @@
 
 #include "memory/allStatic.hpp"
 #include "utilities/globalDefinitions.hpp"
+#include "utilities/growableArray.hpp"
 #include "utilities/macros.hpp"
 
 class JavaThread;
@@ -53,6 +54,8 @@ class CDSConfig : public AllStatic {
   static bool  _old_cds_flags_used;
   static bool  _new_aot_flags_used;
   static bool  _disable_heap_dumping;
+  static bool  _has_merge_inputs;
+  static GrowableArrayCHeap<const char*, mtClassShared>* _merge_input_paths;
 
   static JavaThread* _dumper_thread;
 #endif
@@ -200,6 +203,9 @@ public:
 
   // --- AOT cache merging at runtime
   static bool is_merging_aot_cache()                         { return CDS_ONLY(_is_merging_aot_cache) NOT_CDS(false); }
+  static bool has_merge_inputs()                             { return CDS_ONLY(_has_merge_inputs) NOT_CDS(false); }
+  static int  num_merge_inputs()                             { return CDS_ONLY(_merge_input_paths != nullptr ? _merge_input_paths->length() : 0) NOT_CDS(0); }
+  static const char* merge_input_at(int i)                   { return CDS_ONLY(_merge_input_paths->at(i)) NOT_CDS(nullptr); }
 
   // Some CDS functions assume that they are called only within a single-threaded context. I.e.,
   // they are called from:

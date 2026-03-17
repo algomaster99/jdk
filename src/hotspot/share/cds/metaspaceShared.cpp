@@ -327,8 +327,42 @@ void MetaspaceShared::initialize_for_static_dump() {
   _symbol_region.init(&_symbol_rs, &_symbol_vs);
 }
 
+// Called in the helper VM (when -XX:AOTDumpArchivedClassList=<file> is set).
+// Writes the internal names of all archived classes to the specified file, one per line,
+// then exits immediately. Called from MetaspaceShared::post_initialize().
+static void dump_archived_classlist(const char* output_path) {
+  fileStream fs(output_path);
+  if (!fs.is_open()) {
+    log_error(aot, merge)("Cannot open %s for writing class list", output_path);
+    vm_direct_exit(1);
+  }
+
+  GrowableArray<Klass*> classes;
+  SystemDictionaryShared::get_all_archived_classes(true, &classes);
+  log_info(aot, merge)("Writing %d archived class names to %s", classes.length(), output_path);
+  for (int i = 0; i < classes.length(); i++) {
+    Klass* k = classes.at(i);
+    if (k->is_instance_klass()) {
+      ResourceMark rm;
+      fs.print_cr("%s", k->name()->as_C_string());
+    }
+  }
+  vm_direct_exit(0);
+}
+
 // Called by universe_post_init()
 void MetaspaceShared::post_initialize(TRAPS) {
+  // If the helper VM was started with -XX:AOTDumpArchivedClassList, write class names and exit.
+  if (!FLAG_IS_DEFAULT(AOTDumpArchivedClassList) && AOTDumpArchivedClassList != nullptr) {
+    if (CDSConfig::is_using_archive()) {
+      dump_archived_classlist(AOTDumpArchivedClassList);
+      // dump_archived_classlist calls vm_direct_exit(); does not return
+    } else {
+      log_error(aot, merge)("AOTDumpArchivedClassList requires an AOT cache to be loaded (-XX:AOTCache=<file>)");
+      vm_direct_exit(1);
+    }
+  }
+
   if (CDSConfig::is_using_archive()) {
     FileMapInfo *static_mapinfo = FileMapInfo::current_info();
     FileMapInfo *dynamic_mapinfo = FileMapInfo::dynamic_info();
@@ -1126,7 +1160,8 @@ static int exec_jvm_with_java_tool_options(const char* java_launcher_path, TRAPS
     if (strstr(arg, "-XX:AOTCacheOutput=") == arg || // arg starts with ...
         strstr(arg, "-XX:AOTConfiguration=") == arg ||
         strstr(arg, "-XX:AOTMode=") == arg ||
-        strstr(arg, "-XX:AOTCache=") == arg) {
+        strstr(arg, "-XX:AOTCache=") == arg ||
+        strstr(arg, "-XX:AOTMergeInputs=") == arg) {
       // Filter these out. They wiill be set below.
     } else {
       append_args(&args, arg, CHECK_0);
@@ -2113,8 +2148,10 @@ public:
     InstanceKlass* ik = InstanceKlass::cast(k);
     _all_classes->append(ik);
 
-    // this is -1 for classes not in the aot cache
-    if (ik->shared_classpath_index() == -1) {
+    // Classes loaded from classfiles during this merge VM run (not from the primary archive)
+    // are the "new" classes to include in the merged cache. is_shared() is true only for
+    // classes that were loaded from an archive.
+    if (!ik->is_shared()) {
       _new_classes->append(ik);
     }
   }
@@ -2150,6 +2187,177 @@ void MetaspaceShared::collect_loaded_classes_for_merge(GrowableArray<InstanceKla
   // we only choose the new classes to update the cache
   // if we do all_classes then we will rewrite the cache with all the classes, which is not what we want
   to_be_merged_classes->appendAll(&new_classes);
+}
+
+
+// Fork a helper VM to extract class names from a secondary AOT cache into a temp classlist file.
+// The helper runs: java -XX:AOTMode=on -XX:AOTCache=<cache_path>
+//                       -XX:AOTDumpArchivedClassList=<classlist_path>
+static int fork_extract_helper(const char* cache_path, const char* classlist_path, TRAPS) {
+  ResourceMark rm(THREAD);
+  HandleMark hm(THREAD);
+  GrowableArray<Handle> args;
+
+  // Pass the app classpath so the secondary cache can validate its classpath entries
+  if (AOTClassLocationConfig::dumptime_is_ready()) {
+    const AOTClassLocationConfig* cl_config = AOTClassLocationConfig::dumptime();
+    int app_start = cl_config->app_cp_start_index();
+    int app_end   = cl_config->app_cp_end_index();
+    if (app_end > app_start) {
+      stringStream ss;
+      ss.print("-Djava.class.path=");
+      for (int i = app_start; i < app_end; i++) {
+        if (i > app_start) ss.print_raw(os::path_separator());
+        ss.print_raw(cl_config->class_location_at(i)->path());
+      }
+      append_args(&args, ss.freeze(), CHECK_0);
+    }
+  } else {
+    const char* cp = Arguments::get_appclasspath();
+    if (cp != nullptr && strlen(cp) > 0 && strcmp(cp, ".") != 0) {
+      stringStream ss;
+      ss.print("-Djava.class.path=");
+      ss.print_raw(cp);
+      append_args(&args, ss.freeze(), CHECK_0);
+    }
+  }
+
+  // Pass all parent JVM args, filtering out AOT-specific flags
+  for (int i = 0; i < Arguments::num_jvm_args(); i++) {
+    const char* arg = Arguments::jvm_args_array()[i];
+    if (strstr(arg, "-XX:AOTCacheOutput=") == arg ||
+        strstr(arg, "-XX:AOTConfiguration=") == arg ||
+        strstr(arg, "-XX:AOTMode=") == arg ||
+        strstr(arg, "-XX:AOTCache=") == arg ||
+        strstr(arg, "-XX:AOTMergeInputs=") == arg ||
+        strstr(arg, "-XX:AOTDumpArchivedClassList=") == arg) {
+      // Filter these out; we set them below
+    } else {
+      append_args(&args, arg, CHECK_0);
+    }
+  }
+
+  {
+    stringStream ss;
+    ss.print("-XX:AOTCache=");
+    ss.print_raw(cache_path);
+    append_args(&args, ss.freeze(), CHECK_0);
+  }
+  {
+    stringStream ss;
+    ss.print("-XX:AOTDumpArchivedClassList=");
+    ss.print_raw(classlist_path);
+    append_args(&args, ss.freeze(), CHECK_0);
+  }
+  append_args(&args, "-XX:AOTMode=on", CHECK_0);
+
+  stringStream launcher_ss;
+  print_java_launcher(&launcher_ss);
+  const char* java_launcher_path = launcher_ss.freeze();
+
+  Symbol* klass_name = SymbolTable::new_symbol("jdk/internal/misc/CDS$ProcessLauncher");
+  Klass* k = SystemDictionary::resolve_or_fail(klass_name, true, CHECK_0);
+  Symbol* methodName = SymbolTable::new_symbol("execWithJavaToolOptions");
+  Symbol* methodSignature = SymbolTable::new_symbol("(Ljava/lang/String;[Ljava/lang/String;)I");
+
+  Handle launcher = java_lang_String::create_from_str(java_launcher_path, CHECK_0);
+  objArrayOop array = oopFactory::new_objArray(vmClasses::String_klass(), args.length(), CHECK_0);
+  for (int i = 0; i < args.length(); i++) {
+    array->obj_at_put(i, args.at(i)());
+  }
+  objArrayHandle launcher_args(THREAD, array);
+
+  JavaValue result(T_OBJECT);
+  JavaCallArguments javacall_args(2);
+  javacall_args.push_oop(launcher);
+  javacall_args.push_oop(launcher_args);
+  JavaCalls::call_static(&result,
+                          InstanceKlass::cast(k),
+                          methodName,
+                          methodSignature,
+                          &javacall_args,
+                          CHECK_0);
+  return result.get_jint();
+}
+
+// Load classes whose names are listed in a classlist file (one internal class name per line).
+// Used after a helper VM has extracted class names from a secondary AOT cache.
+static void load_and_link_classes_from_secondary_classlist(const char* classlist_path, TRAPS) {
+  FILE* f = os::fopen(classlist_path, "r"); // NOLINT
+  if (f == nullptr) {
+    log_warning(aot, merge)("Cannot open secondary classlist %s; skipping", classlist_path);
+    return;
+  }
+
+  Handle boot_loader;  // null = bootstrap class loader
+  Handle sys_loader(THREAD, SystemDictionary::java_system_loader());
+
+  int loaded = 0;
+  int skipped = 0;
+  char line[4096];
+  while (fgets(line, sizeof(line), f) != nullptr) {
+    // Strip trailing newline/carriage-return
+    int len = (int)strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+      line[--len] = '\0';
+    }
+    if (len == 0) continue;
+
+    TempNewSymbol sym = SymbolTable::new_symbol(line);
+    // Try boot loader first, then app loader
+    Klass* k = SystemDictionary::resolve_or_null(sym, boot_loader, THREAD);
+    if (HAS_PENDING_EXCEPTION) CLEAR_PENDING_EXCEPTION;
+    if (k == nullptr) {
+      k = SystemDictionary::resolve_or_null(sym, sys_loader, THREAD);
+      if (HAS_PENDING_EXCEPTION) CLEAR_PENDING_EXCEPTION;
+    }
+    if (k != nullptr) {
+      if (k->is_instance_klass()) {
+        MetaspaceShared::try_link_class(THREAD, InstanceKlass::cast(k));
+        // if any class fails here, it won't be included in the preimage
+        if (HAS_PENDING_EXCEPTION) CLEAR_PENDING_EXCEPTION;
+      }
+      loaded++;
+      log_debug(aot, merge)("  loaded secondary class: %s", line);
+    } else {
+      skipped++;
+      log_debug(aot, merge)("  skipped (not resolvable): %s", line);
+    }
+  }
+  fclose(f);
+  log_info(aot, merge)("Secondary classlist %s: loaded %d, skipped %d classes",
+                        classlist_path, loaded, skipped);
+}
+
+// For each secondary cache in CDSConfig::merge_input_paths(), fork a helper VM to extract
+// class names, then load those classes in the main VM from the classpath.
+static void extract_classes_from_secondary_caches(TRAPS) {
+  int n = CDSConfig::num_merge_inputs();
+  for (int i = 0; i < n; i++) {
+    const char* cache_path = CDSConfig::merge_input_at(i);
+    log_info(aot, merge)("Extracting classes from secondary cache[%d]: %s", i, cache_path);
+
+    // Build temp classlist path: <AOTCacheOutput>.classlist.<i>
+    size_t len = strlen(AOTCacheOutput) + 32;
+    char* classlist_path = AllocateHeap(len, mtArguments);
+    jio_snprintf(classlist_path, len, "%s.classlist.%d", AOTCacheOutput, i);
+
+    log_info(aot, merge)("  Forking helper VM; classlist temp file: %s", classlist_path);
+    int status = fork_extract_helper(cache_path, classlist_path, CHECK);
+    if (status != 0) {
+      log_warning(aot, merge)("  Helper VM exited with status %d for %s; skipping", status, cache_path);
+      FreeHeap(classlist_path);
+      continue;
+    }
+
+    load_and_link_classes_from_secondary_classlist(classlist_path, CHECK);
+
+    // Delete temp classlist
+    if (::remove(classlist_path) != 0) {
+      log_debug(aot, merge)("  Could not delete temp classlist %s", classlist_path);
+    }
+    FreeHeap(classlist_path);
+  }
 }
 
 void MetaspaceShared::start_merging_aot_cache(TRAPS) {
@@ -2194,6 +2402,10 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
   }
   SystemDictionaryShared::initialize();
   AOTClassLinker::initialize();
+
+  if (CDSConfig::has_merge_inputs()) {
+    extract_classes_from_secondary_caches(CHECK);
+  }
 
   GrowableArray<Klass*> archived;
   SystemDictionaryShared::get_all_archived_classes(true, &archived);

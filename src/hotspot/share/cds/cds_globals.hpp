@@ -122,6 +122,14 @@
   product(ccstr, AOTCacheOutput, nullptr,                                   \
           "Specifies the file name for writing the AOT cache")              \
                                                                             \
+  product(ccstr, AOTMergeInputs, nullptr,                                   \
+          "Additional AOT cache files to merge (separated by path "         \
+          "separator)")                                                     \
+                                                                            \
+  product(ccstr, AOTDumpArchivedClassList, nullptr,                         \
+          "Dump names of all archived classes to the specified file and "   \
+          "exit immediately")                                               \
+                                                                            \
   product(bool, AOTInvokeDynamicLinking, false, DIAGNOSTIC,                 \
           "AOT-link JVM_CONSTANT_InvokeDynamic entries in cached "          \
           "ConstantPools")                                                  \

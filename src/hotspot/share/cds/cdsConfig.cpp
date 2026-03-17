@@ -38,7 +38,9 @@
 #include "runtime/arguments.hpp"
 #include "runtime/globals_extension.hpp"
 #include "runtime/java.hpp"
+#include "runtime/os.hpp"
 #include "runtime/vmThread.hpp"
+#include "utilities/growableArray.hpp"
 #include "utilities/defaultStream.hpp"
 #include "utilities/formatBuffer.hpp"
 
@@ -56,6 +58,8 @@ bool CDSConfig::_old_cds_flags_used = false;
 bool CDSConfig::_new_aot_flags_used = false;
 bool CDSConfig::_disable_heap_dumping = false;
 bool CDSConfig::_is_merging_aot_cache = false;
+bool CDSConfig::_has_merge_inputs = false;
+GrowableArrayCHeap<const char*, mtClassShared>* CDSConfig::_merge_input_paths = nullptr;
 
 const char* CDSConfig::_default_archive_path = nullptr;
 const char* CDSConfig::_input_static_archive_path = nullptr;
@@ -416,6 +420,12 @@ void CDSConfig::check_aot_flags() {
   CHECK_NEW_FLAG(AOTConfiguration);
   CHECK_NEW_FLAG(AOTMode);
 
+  if (!FLAG_IS_DEFAULT(AOTMergeInputs)) {
+    if (FLAG_IS_DEFAULT(AOTMode) || AOTMode == nullptr || strcmp(AOTMode, "merge") != 0) {
+      vm_exit_during_initialization("-XX:AOTMergeInputs requires -XX:AOTMode=merge");
+    }
+  }
+
   CHECK_SINGLE_PATH(AOTCache);
   CHECK_SINGLE_PATH(AOTCacheOutput);
   CHECK_SINGLE_PATH(AOTConfiguration);
@@ -500,6 +510,32 @@ void CDSConfig::check_aotmode_merge() {
 
   log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s AOTCacheOutput=%s AOTConfiguration=%s",
                        AOTCache, AOTCacheOutput, AOTConfiguration);
+
+  // Parse AOTMergeInputs into the _merge_input_paths array
+  if (!FLAG_IS_DEFAULT(AOTMergeInputs) && AOTMergeInputs != nullptr) {
+    _merge_input_paths = new GrowableArrayCHeap<const char*, mtClassShared>(4);
+    const char* sep = os::path_separator();
+    const char* p = AOTMergeInputs;
+    while (*p != '\0') {
+      const char* end = strstr(p, sep);
+      if (end == nullptr) {
+        end = p + strlen(p);
+      }
+      size_t len = end - p;
+      if (len > 0) {
+        char* path = AllocateHeap(len + 1, mtArguments);
+        strncpy(path, p, len);
+        path[len] = '\0';
+        _merge_input_paths->append(path);
+        log_info(aot, merge)("  secondary merge input: %s", path);
+      }
+      p = end;
+      if (*p != '\0') p += strlen(sep);
+    }
+    if (_merge_input_paths->length() > 0) {
+      _has_merge_inputs = true;
+    }
+  }
 }
 
 void CDSConfig::check_aotmode_off() {
