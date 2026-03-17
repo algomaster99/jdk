@@ -78,6 +78,15 @@ void AOTLinkedClassBulkLoader::load_non_javabase_classes(JavaThread* current) {
 void AOTLinkedClassBulkLoader::load_classes_in_loader(JavaThread* current, AOTLinkedClassCategory class_category, oop class_loader_oop) {
   load_classes_in_loader_impl(class_category, class_loader_oop, current);
   if (current->has_pending_exception()) {
+    // We don't care about loading classes from cache
+    // get_archived_classes is sufficient
+    if (CDSConfig::has_merge_inputs() && class_category == AOTLinkedClassCategory::APP) {
+      ResourceMark rm(current);
+      log_info(aot)("Ignoring AOT-linked app class loading failure during supply-chain merge: %s",
+                    current->pending_exception()->klass()->external_name());
+      current->clear_pending_exception();
+      return;
+    }
     // We cannot continue, as we might have loaded some of the aot-linked classes, which
     // may have dangling C++ pointers to other aot-linked classes that we have failed to load.
     exit_on_exception(current);
