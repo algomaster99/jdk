@@ -75,7 +75,11 @@ jobs:
         run: |
           COMMIT=${{ steps.package.outputs.commit }}
           ARCHIVE=${{ steps.package.outputs.archive }}
-          NOTES=$(git log --oneline supply-chain-aotcache..HEAD)
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          NOTES=""
+          if [[ -n "$LAST_TAG" ]]; then
+            NOTES=$(git log --oneline "${LAST_TAG}..HEAD")
+          fi
           gh release create "jdk-supply-chain-aotcache-${COMMIT}" \
             --title "Custom JDK: supply-chain-aotcache (${COMMIT})" \
             --notes "${NOTES}" \
