@@ -48,7 +48,7 @@ jobs:
       - name: 'Package'
         id: package
         run: |
-          COMMIT=$(git rev-parse HEAD)
+          COMMIT=$(git rev-parse --short HEAD)
           ARCHIVE="jdk-supply-chain-aotcache-${COMMIT}.tar.gz"
           tar -czf "$ARCHIVE" -C build/linux-x86_64-server-release/images jdk
           echo "commit=${COMMIT}" >> $GITHUB_OUTPUT
