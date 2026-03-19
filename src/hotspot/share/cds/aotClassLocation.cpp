@@ -619,10 +619,25 @@ void AOTClassLocationConfig::add_class_location(JavaThread* current, GrowableCla
       size_t name_len = strlen(file_start);
       if (name_len > 0) {
         ResourceMark rm(current);
-        size_t libname_len = dir_len + name_len;
-        char* libname = NEW_RESOURCE_ARRAY(char, libname_len + 1);
-        int n = os::snprintf(libname, libname_len + 1, "%.*s%s", dir_len, dir_name, file_start);
-        assert((size_t)n == libname_len, "Unexpected number of characters in string");
+        char* libname;
+        // fix "/target/surefire/file:/home/aman/.../target/classes/"  ← bogus
+        if (strncmp(file_start, "file:", 5) == 0) {
+          // Absolute file: URL (e.g. used by Maven Surefire in Class-Path manifest entries).
+          // Convert the URI to a plain path instead of prepending the JAR's directory.
+          libname = ClassLoader::uri_to_path(file_start);
+        } else {
+          size_t libname_len = dir_len + name_len;
+          libname = NEW_RESOURCE_ARRAY(char, libname_len + 1);
+          int n = os::snprintf(libname, libname_len + 1, "%.*s%s", dir_len, dir_name, file_start);
+          assert((size_t)n == libname_len, "Unexpected number of characters in string");
+        }
+
+        // Skip test-classes directories (e.g. Maven's target/test-classes/).
+        bool found_test_class = false;
+        if (strstr(libname, "/target/test-classes") != nullptr) {
+          aot_log_warning(aot)("Skipping Class-Path entry '%s' because it may contain test classes", libname);
+          found_test_class = true;
+        }
 
         // Avoid infinite recursion when two JAR files refer to each
         // other via cpattr.
@@ -633,7 +648,7 @@ void AOTClassLocationConfig::add_class_location(JavaThread* current, GrowableCla
             break;
           }
         }
-        if (!found_duplicate) {
+        if (!found_duplicate && !found_test_class) {
           add_class_location(current, tmp_array, libname, group, parse_manifest, /*from_cpattr*/true);
         }
       }
