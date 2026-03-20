@@ -934,6 +934,10 @@ void CDSConfig::log_reasons_for_not_dumping_heap() {
 
   if (_disable_heap_dumping) {
     reason = "Programmatically disabled";
+  } else if (is_merging_aot_cache() && _has_merge_inputs) {
+    // Heap archiving only happens in the final static archive assembly phase,
+    // not during preimage creation or AOT cache merging.
+    reason = "Java heap is not archived in preimage or merge phase";
   } else {
     reason = check_options_incompatible_with_dumping_heap();
   }

@@ -337,6 +337,8 @@ static void dump_archived_classlist(const char* output_path) {
     vm_direct_exit(1);
   }
 
+  // this is important before array allocation
+  ResourceMark rm;
   GrowableArray<Klass*> classes;
   SystemDictionaryShared::get_all_archived_classes(true, &classes);
   log_info(aot, merge)("Writing %d archived class names to %s", classes.length(), output_path);
@@ -1261,7 +1263,7 @@ bool MetaspaceShared::try_link_class(JavaThread* current, InstanceKlass* ik) {
   assert(CDSConfig::is_dumping_archive(), "sanity");
 
   if (ik->is_shared() && !CDSConfig::is_dumping_final_static_archive()) {
-    assert(CDSConfig::is_dumping_dynamic_archive(), "must be");
+    assert(CDSConfig::is_dumping_dynamic_archive() || CDSConfig::is_merging_aot_cache(), "must be");
     return false;
   }
 
@@ -2289,6 +2291,8 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
     return;
   }
 
+  // this is important before allocation
+  HandleMark hm(THREAD);
   Handle boot_loader;  // null = bootstrap class loader
   Handle sys_loader(THREAD, SystemDictionary::java_system_loader());
 

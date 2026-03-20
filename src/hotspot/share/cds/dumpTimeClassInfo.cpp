@@ -146,7 +146,13 @@ DumpTimeClassInfo* DumpTimeSharedClassTable::allocate_info(InstanceKlass* k) {
          "Do not call with shared classes");
   bool created;
   DumpTimeClassInfo* p = put_if_absent(k, &created);
-  assert(created, "must not exist in table");
+  if (!created) {
+    // During merge, classes may already be registered via the Klass constructor
+    // (e.g. ProcessPipeOutputStream loaded when forking helper VMs).
+    assert(CDSConfig::is_merging_aot_cache(), "must not exist in table");
+    assert(p->_klass == k, "Sanity");
+    return p;
+  }
   p->_klass = k;
   return p;
 }
