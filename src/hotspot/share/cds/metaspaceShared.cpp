@@ -2174,14 +2174,6 @@ void MetaspaceShared::collect_loaded_classes_for_merge(GrowableArray<InstanceKla
                        all_classes.length(),
                        all_classes.length() - new_classes.length(),
                        new_classes.length());
-  for (int i = 0; i < new_classes.length(); i++) {
-    InstanceKlass* ik = new_classes.at(i);
-    log_debug(aot, merge)("  new class: %s (loader: %s) (isHidden: %hhd)",
-                          ik->external_name(),
-                          ik->class_loader_data()->loader_name(),
-                          ik->is_hidden());
-  }
-
   // Verify that new_classes is a subset of all_classes
   // new_classes is filtered from all_classes, so this should always hold
   assert(new_classes.length() <= all_classes.length(), "sanity");
@@ -2510,10 +2502,10 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
     classes_for_merged_aot_cache.append(archived.at(i));
   }
 
-  log_info(aot, merge)("Total classes for merged preimage: %d", classes_for_merged_aot_cache.length());
   for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
     log_debug(aot, merge)("class for merged cache %s", classes_for_merged_aot_cache.at(i)->external_name());
   }
+  log_info(aot, merge)("Total classes for merged preimage: %d", classes_for_merged_aot_cache.length());
 
   for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
     Klass* k = classes_for_merged_aot_cache.at(i);
