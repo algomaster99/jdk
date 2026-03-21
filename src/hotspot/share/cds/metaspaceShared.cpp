@@ -2407,6 +2407,44 @@ void MetaspaceShared::start_merging_aot_cache(TRAPS) {
   SystemDictionaryShared::get_all_archived_classes(true, &archived);
   log_info(aot, merge)("Found %d classes in archived dictionaries", archived.length());
 
+  // Cap shared_classpath_index for classes from the primary archive.
+  // The primary archive may have been built with more classpath entries (e.g. 64)
+  // than the merge run (e.g. 4). Out-of-range indices cause a SIGSEGV in
+  // CDSProtectionDomain::init_security_info when the assembly child dereferences
+  // past the end of AOTClassLocationConfig. Capping to app_cp_start_index keeps
+  // the index in range. The wrong jar association is harmless: at runtime,
+  // is_archived_class_visible_on_classpath falls back to
+  // is_class_in_current_classpath which searches by class name, not by index.
+  {
+    const AOTClassLocationConfig* new_config = AOTClassLocationConfig::dumptime();
+
+    if (new_config != nullptr) {
+      int new_len = new_config->length();
+      int fallback_idx = (new_config->app_cp_start_index() < new_len)
+                         ? new_config->app_cp_start_index() : 0;
+      int capped_count = 0;
+
+      for (int i = 0; i < archived.length(); i++) {
+        Klass* k = archived.at(i);
+        if (!k->is_instance_klass()) continue;
+        InstanceKlass* ik = InstanceKlass::cast(k);
+
+        int old_idx = ik->shared_classpath_index();
+        if (old_idx < 0 || old_idx < new_len) continue; // in range or unregistered
+
+        log_debug(aot, merge)("Classpath index cap: %s index %d -> %d (out of range, max %d)",
+                              ik->external_name(), old_idx, fallback_idx, new_len);
+        ik->set_shared_classpath_index(fallback_idx);
+        capped_count++;
+      }
+
+      if (capped_count > 0) {
+        log_info(aot, merge)("Capped %d out-of-range classpath indices to %d (config has %d entries)",
+                             capped_count, fallback_idx, new_len);
+      }
+    }
+  }
+
   // Add loaded from classfiles during this run.
   GrowableArray<InstanceKlass*> newly_loaded_classes;
   // We put all classes instead of only the new ones so that dependencies of new classes can also be cached.
