@@ -836,6 +836,14 @@ void SystemDictionaryShared::add_verification_constraint(InstanceKlass* k, Symbo
          Symbol* from_name, bool from_field_is_protected, bool from_is_array, bool from_is_object,
          bool* skip_assignability_check) {
   assert(CDSConfig::is_dumping_archive(), "sanity");
+  if (!k->is_shared() && _dumptime_table->get(k) == nullptr) {
+    // Class was loaded before dump mode was enabled (e.g., as a transitive dependency
+    // during JVM startup, before start_merging_aot_cache calls enable_dumping_static_archive).
+    // Klass::set_name would not have called init_dumptime_info. Lazily register it now
+    // so that add_verification_constraint below does not crash on a null DumpTimeClassInfo.
+    // This also covers superclasses recursively linked during link_class_impl.
+    init_dumptime_info(k);
+  }
   DumpTimeClassInfo* info = get_info(k);
   info->add_verification_constraint(k, name, from_name, from_field_is_protected,
                                     from_is_array, from_is_object);

@@ -1269,6 +1269,15 @@ bool MetaspaceShared::try_link_class(JavaThread* current, InstanceKlass* ik) {
 
   if (ik->is_loaded() && !ik->is_linked() && ik->can_be_verified_at_dumptime() &&
       !SystemDictionaryShared::has_class_failed_verification(ik)) {
+    // Ensure a DumpTimeClassInfo entry exists for this non-shared class.
+    // A class may be loaded before dump mode is enabled (e.g., AOT bulk-loaded
+    // as a transitive dependency during JVM startup, before start_merging_aot_cache
+    // calls enable_dumping_static_archive). In that case Klass::set_name would not
+    // have called init_dumptime_info. Without this entry, add_verification_constraint
+    // crashes with a null DumpTimeClassInfo during bytecode verification below.
+    if (!ik->is_shared() && SystemDictionaryShared::dumptime_table()->get(ik) == nullptr) {
+      SystemDictionaryShared::init_dumptime_info(ik);
+    }
     bool saved = BytecodeVerificationLocal;
     if (ik->defined_by_other_loaders() && ik->class_loader() == nullptr) {
       // The verification decision is based on BytecodeVerificationRemote
