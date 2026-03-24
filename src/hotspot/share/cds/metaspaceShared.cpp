@@ -2283,6 +2283,17 @@ static int fork_extract_helper(const char* cache_path, const char* classlist_pat
   return result.get_jint();
 }
 
+// Returns true for classes that should never be merged from a secondary cache.
+// These are test-workload artefacts whose presence in a secondary cache is
+static bool should_skip_secondary_class(const char* name) {
+  if (strncmp(name, "jdk/proxy",   9)  == 0) return true;  // JDK runtime proxies
+  if (strstr (name, "$$Lambda")        != nullptr) return true;  // lambda metafactory classes
+  if (strstr (name, "+0x")             != nullptr) return true;  // hidden classes
+  if (strncmp(name, "org/junit/",  10) == 0) return true;  // JUnit
+  if (strncmp(name, "org/apache/maven/surefire/", 26) == 0) return true;  // Maven Surefire
+  return false;
+}
+
 // Load classes whose names are listed in a classlist file (one internal class name per line).
 // Used after a helper VM has extracted class names from a secondary AOT cache.
 static void load_and_link_classes_from_secondary_classlist(const char* classlist_path, TRAPS) {
@@ -2307,6 +2318,12 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
       line[--len] = '\0';
     }
     if (len == 0) continue;
+
+    if (should_skip_secondary_class(line)) {
+      skipped++;
+      log_debug(aot, merge)("  skipped (test/proxy artefact): %s", line);
+      continue;
+    }
 
     TempNewSymbol sym = SymbolTable::new_symbol(line);
     // Try boot loader first, then app loader
