@@ -2,6 +2,12 @@ name: 'Release supply-chain-aotcache'
 
 on:
   workflow_dispatch:
+    inputs:
+      prerelease:
+        description: "Whether to run the workflow for a pre-release"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   release:
@@ -80,7 +86,12 @@ jobs:
           if [[ -n "$LAST_TAG" ]]; then
             NOTES=$(git log --oneline "${LAST_TAG}..HEAD")
           fi
+          PRERELEASE_FLAG=""
+          if [[ "${{ inputs.prerelease }}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
           gh release create "jdk-supply-chain-aotcache-${COMMIT}" \
             --title "Custom JDK: supply-chain-aotcache (${COMMIT})" \
             --notes "${NOTES}" \
+            $PRERELEASE_FLAG \
             "${ARCHIVE}"
