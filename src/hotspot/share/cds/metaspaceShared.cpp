@@ -1299,6 +1299,13 @@ bool MetaspaceShared::try_link_class(JavaThread* current, InstanceKlass* ik) {
     } else {
       assert(!SystemDictionaryShared::has_class_failed_verification(ik), "sanity");
       ik->compute_has_loops_flag_for_methods();
+      ik->initialize(THREAD);
+      if (HAS_PENDING_EXCEPTION) {
+        ResourceMark rm(THREAD);
+        aot_log_warning(aot)("Preload Warning: Initialization failed for %s",
+                      ik->external_name());
+        CLEAR_PENDING_EXCEPTION;
+      }
     }
     BytecodeVerificationLocal = saved;
     return true;
