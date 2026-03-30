@@ -1,0 +1,1 @@
+{"permissions": {"allow": ["Shell(python:*get_context*)", "Shell(python3:*get_context*)"], "deny": []}}
