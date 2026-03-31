@@ -205,6 +205,24 @@ void AOTLinkedClassBulkLoader::load_classes_impl(AOTLinkedClassCategory class_ca
             log_info(aot, load)("%-5s %s (skipped: nest host not loaded)", category_name, ik->external_name());
             continue;
           }
+          // Also skip if any local interface is not yet loaded. An unloaded
+          // interface has null class_loader_data and may have its _implementor
+          // field set to itself (multiple-implementors sentinel) by earlier
+          // classes. Calling add_to_hierarchy on this lambda would then invoke
+          // implementor() -> is_loader_alive() -> class_loader_data()->is_alive()
+          // on the uninitialized interface, causing a SIGSEGV.
+          bool any_intf_unloaded = false;
+          for (int j = 0; j < ik->local_interfaces()->length(); j++) {
+            if (!ik->local_interfaces()->at(j)->is_loaded()) {
+              any_intf_unloaded = true;
+              break;
+            }
+          }
+          if (any_intf_unloaded) {
+            ResourceMark rm(THREAD);
+            log_info(aot, load)("%-5s %s (skipped: interface not loaded)", category_name, ik->external_name());
+            continue;
+          }
         }
       } else if (!AOTClassLocationConfig::is_archived_class_visible_on_classpath(ik->shared_classpath_index())) {
         // Path didn't match — check if the class file exists on the classpath (fat JAR case)
