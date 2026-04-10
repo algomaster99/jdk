@@ -65,11 +65,6 @@ class vmClasses : AllStatic {
 
   static void resolve_shared_class(InstanceKlass* klass, ClassLoaderData* loader_data, Handle domain, TRAPS) NOT_CDS_RETURN;
 
-#ifdef ASSERT
-  static bool contain(Klass* k);
-  static bool contain(Symbol* class_name);
-#endif
-
   static InstanceKlass* _klasses[];
 
   // table of box klasses (int_klass, etc.)
@@ -93,6 +88,9 @@ public:
   static InstanceKlass** klass_addr_at(vmClassID id) {
     return &_klasses[as_int(id)];
   }
+
+  static bool contain(Klass* k);
+  static bool contain(Symbol* class_name);
 
   static void resolve_all(TRAPS);
 

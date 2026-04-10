@@ -284,7 +284,16 @@ bool SystemDictionaryShared::check_for_exclusion_impl(InstanceKlass* k) {
     return warn_excluded(k, "Not in loaded state");
   }
   if (has_been_redefined(k)) {
-    return warn_excluded(k, "Has been redefined");
+    // vmClasses (e.g. java.lang.Object) are hard-referenced by
+    // SystemDictionaryShared::serialize_vm_classes and cannot be excluded from
+    // the archive. Excluding Object is especially fatal: the super-class
+    // exclusion check below cascades the exclusion to every InstanceKlass in
+    // the JVM, and the dump then crashes in ArchiveBuilder::get_buffered_addr
+    // while serializing vmClasses. JVMTI agents (Mockito-inline, JaCoCo, etc.)
+    // routinely retransform Object, so this path is reachable in practice.
+    if (!vmClasses::contain(k)) {
+      return warn_excluded(k, "Has been redefined");
+    }
   }
   if (!k->is_hidden() && k->shared_classpath_index() < 0 && is_builtin(k)) {
     if (k->name()->starts_with("java/lang/invoke/BoundMethodHandle$Species_")) {
@@ -605,22 +614,18 @@ void SystemDictionaryShared::init_dumptime_info_from_preimage(InstanceKlass* k) 
   }
 }
 
-// Check if a class or any of its supertypes has been redefined.
+// Check if a class has been redefined.
+//
+// Historically this also walked java_super() and local_interfaces() recursively.
+// That is catastrophic in practice: any JVMTI agent that retransforms
+// java.lang.Object (e.g. Mockito-inline) causes every InstanceKlass in the JVM
+// to report "redefined", which excludes them all from the AOT archive --
+// including vmClasses that are hard-referenced by serialize_vm_classes(), which
+// then crashes in ArchiveBuilder::get_buffered_addr() during the dump.
+// Only the class itself needs to be checked here; supertype redefinitions are
+// reflected in this class via the normal redefinition machinery.
 bool SystemDictionaryShared::has_been_redefined(InstanceKlass* k) {
-  if (k->has_been_redefined()) {
-    return true;
-  }
-  if (k->java_super() != nullptr && has_been_redefined(k->java_super())) {
-    return true;
-  }
-  Array<InstanceKlass*>* interfaces = k->local_interfaces();
-  int len = interfaces->length();
-  for (int i = 0; i < len; i++) {
-    if (has_been_redefined(interfaces->at(i))) {
-      return true;
-    }
-  }
-  return false;
+  return k->has_been_redefined();
 }
 
 // k is a class before relocating by ArchiveBuilder

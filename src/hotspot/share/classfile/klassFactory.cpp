@@ -32,6 +32,7 @@
 #include "classfile/classLoadInfo.hpp"
 #include "classfile/klassFactory.hpp"
 #include "classfile/systemDictionaryShared.hpp"
+ #include "classfile/vmClasses.hpp"
 #include "memory/resourceArea.hpp"
 #include "prims/jvmtiEnvBase.hpp"
 #include "prims/jvmtiRedefineClasses.hpp"
@@ -186,7 +187,9 @@ InstanceKlass* KlassFactory::create_from_stream(ClassFileStream* stream,
   THREAD->statistical_info().incr_define_class_count();
 
   // Skip this processing for VM hidden classes
-  if (!cl_info.is_hidden()) {
+  bool skip_load_hook_for_vmclass =
+      CDSConfig::is_dumping_archive() && name != nullptr && vmClasses::contain(name);
+  if (!cl_info.is_hidden() && !skip_load_hook_for_vmclass) {
     stream = check_class_file_load_hook(stream,
                                         name,
                                         loader_data,

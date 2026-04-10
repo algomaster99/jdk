@@ -77,7 +77,13 @@ void RegeneratedClasses::record_regenerated_objects() {
   assert_locked_or_safepoint(DumpTimeTable_lock);
   if (_renegerated_objs != nullptr) {
     auto doit = [&] (address orig_obj, address regen_obj) {
-      ArchiveBuilder::current()->record_regenerated_object(orig_obj, regen_obj);
+      // The regen klass/method may have been excluded by the dump-time exclusion
+      // pass (e.g. SystemDictionaryShared::has_been_redefined() returns true after
+      // a JVMTI agent retransforms java.lang.Object). In that case _src_obj_table
+      // has no entry for regen_obj and record_regenerated_object would deref null.
+      if (ArchiveBuilder::current()->has_been_archived(regen_obj)) {
+        ArchiveBuilder::current()->record_regenerated_object(orig_obj, regen_obj);
+      }
     };
     _renegerated_objs->iterate_all(doit);
   }

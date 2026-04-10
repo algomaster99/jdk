@@ -58,7 +58,6 @@ static const short vm_class_name_ids[] = {
 };
 
 
-#ifdef ASSERT
 bool vmClasses::contain(Symbol* class_name) {
   int sid;
   for (int i = 0; (sid = vm_class_name_ids[i]) != 0; i++) {
@@ -73,7 +72,6 @@ bool vmClasses::contain(Symbol* class_name) {
 bool vmClasses::contain(Klass* k) {
   return contain(k->name());
 }
-#endif
 
 bool vmClasses::resolve(vmClassID id, TRAPS) {
   InstanceKlass** klassp = &_klasses[as_int(id)];
