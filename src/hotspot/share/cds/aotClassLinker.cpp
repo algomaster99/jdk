@@ -23,6 +23,7 @@
  */
 
 #include "cds/aotClassLinker.hpp"
+#include "cds/aotClassLocation.hpp"
 #include "cds/aotConstantPoolResolver.hpp"
 #include "cds/aotLinkedClassTable.hpp"
 #include "cds/archiveBuilder.hpp"
@@ -119,6 +120,19 @@ void AOTClassLinker::add_new_candidate(InstanceKlass* ik) {
   }
 }
 
+bool AOTClassLinker::should_seed_candidate(InstanceKlass* ik) {
+  if (is_vm_class(ik)) {
+    return true;
+  }
+
+  if (ik->is_hidden() || ik->class_loader() != SystemDictionary::java_system_loader()) {
+    return false;
+  }
+
+  ResourceMark rm;
+  return AOTClassLocationConfig::is_class_in_current_classpath(ik->name()->as_C_string());
+}
+
 // ik is a candidate for aot-linking; see if it can really work
 // that way, and return success or failure. Not only must ik itself
 // look like a class that can be aot-linked but its supers must also be
@@ -176,13 +190,23 @@ bool AOTClassLinker::try_add_candidate(InstanceKlass* ik) {
 void AOTClassLinker::add_candidates() {
   assert_at_safepoint();
   if (CDSConfig::is_dumping_aot_linked_classes()) {
+    int seeded = 0;
+    int skipped = 0;
     GrowableArray<Klass*>* klasses = ArchiveBuilder::current()->klasses();
     for (GrowableArrayIterator<Klass*> it = klasses->begin(); it != klasses->end(); ++it) {
       Klass* k = *it;
       if (k->is_instance_klass()) {
-        try_add_candidate(InstanceKlass::cast(k));
+        InstanceKlass* ik = InstanceKlass::cast(k);
+        if (should_seed_candidate(ik)) {
+          seeded++;
+          try_add_candidate(ik);
+        } else {
+          skipped++;
+        }
       }
     }
+    log_info(aot, link)("seeded %d class(es), skipped %d non-app-classpath class(es) for AOT linking",
+                        seeded, skipped);
   }
 }
 
