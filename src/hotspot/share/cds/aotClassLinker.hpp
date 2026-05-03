@@ -84,6 +84,7 @@ class AOTClassLinker :  AllStatic {
 
   static void add_vm_class(InstanceKlass* ik);
   static void add_new_candidate(InstanceKlass* ik);
+  static bool should_seed_candidate(InstanceKlass* ik);
 
   static Array<InstanceKlass*>* write_classes(oop class_loader, bool is_javabase);
   static int count_public_classes(oop loader);
