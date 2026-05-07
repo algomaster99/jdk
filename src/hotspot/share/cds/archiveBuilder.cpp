@@ -521,12 +521,11 @@ bool ArchiveBuilder::is_excluded(Klass* klass) {
       }
       return info->is_excluded();
     }
-    if (CDSConfig::is_merging_aot_cache()) {
-      // In merge mode a class reachable via ConstantPool pointer-following (e.g. a
-      // dynamically generated proxy class referenced by Proxy$ProxyBuilder) may have no
-      // DumpTimeClassInfo if it was excluded from classes_for_merged_aot_cache before
-      // init_dumptime_info() was called. Treat it as excluded so the pointer is set_to_null
-      // rather than crashing in get_info_locked() with a null DumpTimeClassInfo.
+    if (CDSConfig::is_merging_aot_cache() || CDSConfig::is_dumping_final_static_archive()) {
+      // A class reachable via ConstantPool pointer-following (e.g. a dynamically generated
+      // proxy class) may have no DumpTimeClassInfo if it was excluded before init_dumptime_info()
+      // was called, or is not on the application classpath in create mode. Treat it as excluded
+      // so the pointer is set_to_null rather than crashing in get_info_locked().
       DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(ik);
       if (info == nullptr) {
         return true;
