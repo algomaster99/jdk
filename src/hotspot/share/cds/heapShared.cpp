@@ -697,6 +697,10 @@ void HeapShared::scan_java_mirror(oop orig_mirror) {
 }
 
 void HeapShared::scan_java_class(Klass* orig_k) {
+  // App-loader classes whose hierarchy includes a custom-loader type are absent
+  // from AOTLinkedClassTable and are not bulk-loaded in AOTMode=create, so their
+  // mirrors remain cleared from the preimage strip.
+  if (orig_k->java_mirror() == nullptr) return;
   scan_java_mirror(orig_k->java_mirror());
 
   if (orig_k->is_instance_klass()) {
