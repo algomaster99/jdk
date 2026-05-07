@@ -2844,7 +2844,8 @@ bool InstanceKlass::can_be_verified_at_dumptime() const {
   Array<InstanceKlass*>* interfaces = local_interfaces();
   int len = interfaces->length();
   for (int i = 0; i < len; i++) {
-    if (!interfaces->at(i)->can_be_verified_at_dumptime()) {
+    InstanceKlass* iface = interfaces->at(i);
+    if (iface == nullptr || !iface->can_be_verified_at_dumptime()) {
       return false;
     }
   }

@@ -697,7 +697,9 @@ void HeapShared::scan_java_mirror(oop orig_mirror) {
 }
 
 void HeapShared::scan_java_class(Klass* orig_k) {
-  scan_java_mirror(orig_k->java_mirror());
+  oop mirror = orig_k->java_mirror();
+  if (mirror == nullptr) return;
+  scan_java_mirror(mirror);
 
   if (orig_k->is_instance_klass()) {
     InstanceKlass* orig_ik = InstanceKlass::cast(orig_k);
