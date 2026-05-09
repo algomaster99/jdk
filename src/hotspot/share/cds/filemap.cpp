@@ -235,6 +235,7 @@ void FileMapHeader::populate(FileMapInfo *info, size_t core_region_alignment,
   _max_heap_size = MaxHeapSize;
   _use_optimized_module_handling = CDSConfig::is_using_optimized_module_handling();
   _has_aot_linked_classes = CDSConfig::is_dumping_aot_linked_classes();
+  _is_merged_cache = CDSConfig::is_merging_aot_cache();
   _has_full_module_graph = CDSConfig::is_dumping_full_module_graph();
 
   // The following fields are for sanity checks for whether this archive
@@ -310,6 +311,7 @@ void FileMapHeader::print(outputStream* st) {
   st->print_cr("- use_optimized_module_handling:  %d", _use_optimized_module_handling);
   st->print_cr("- has_full_module_graph           %d", _has_full_module_graph);
   st->print_cr("- has_aot_linked_classes          %d", _has_aot_linked_classes);
+  st->print_cr("- is_merged_cache                 %d", _is_merged_cache);
 }
 
 bool FileMapInfo::validate_class_location() {
@@ -1845,6 +1847,9 @@ bool FileMapInfo::open_as_input() {
 bool FileMapInfo::validate_aot_class_linking() {
   // These checks need to be done after FileMapInfo::initialize(), which gets called before Universe::heap()
   // is available.
+  if (header()->is_merged_cache()) {
+    CDSConfig::set_is_merged_cache(true);
+  }
   if (header()->has_aot_linked_classes()) {
     const char* archive_type = CDSConfig::type_of_archive_being_loaded();
     CDSConfig::set_has_aot_linked_classes(true);
