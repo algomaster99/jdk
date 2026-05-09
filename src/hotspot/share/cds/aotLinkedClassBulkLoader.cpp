@@ -224,6 +224,14 @@ void AOTLinkedClassBulkLoader::load_classes_impl(AOTLinkedClassCategory class_ca
             continue;
           }
         }
+      } else if (CDSConfig::is_merged_cache()) {
+        // Merged cache: defer named APP classes to on-demand loading via
+        // SystemDictionaryShared::find_or_load_shared_class(). Hidden classes
+        // (lambda proxies, LambdaForms) are handled above and still load eagerly
+        // because they cannot be resolved by name.
+        ResourceMark rm(THREAD);
+        log_info(aot, load)("%-5s %s (deferred: merged cache lazy mode)", category_name, ik->external_name());
+        continue;
       } else if (!AOTClassLocationConfig::is_archived_class_visible_on_classpath(ik->shared_classpath_index())) {
         // Path didn't match — check if the class file exists on the classpath (fat JAR case)
         ResourceMark rm(THREAD);

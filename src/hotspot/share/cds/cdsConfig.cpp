@@ -52,6 +52,7 @@ bool CDSConfig::_is_using_optimized_module_handling = true;
 bool CDSConfig::_is_dumping_full_module_graph = true;
 bool CDSConfig::_is_using_full_module_graph = true;
 bool CDSConfig::_has_aot_linked_classes = false;
+bool CDSConfig::_is_merged_cache = false;
 bool CDSConfig::_is_single_command_training = false;
 bool CDSConfig::_has_temp_aot_config_file = false;
 bool CDSConfig::_old_cds_flags_used = false;
@@ -1028,6 +1029,14 @@ bool CDSConfig::is_using_aot_linked_classes() {
 
 void CDSConfig::set_has_aot_linked_classes(bool has_aot_linked_classes) {
   _has_aot_linked_classes |= has_aot_linked_classes;
+}
+
+bool CDSConfig::is_merged_cache() {
+  return _is_merged_cache;
+}
+
+void CDSConfig::set_is_merged_cache(bool v) {
+  _is_merged_cache = v;
 }
 
 bool CDSConfig::is_initing_classes_at_dump_time() {

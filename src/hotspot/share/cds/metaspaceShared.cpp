@@ -505,6 +505,17 @@ void MetaspaceShared::early_serialize(SerializeClosure* soc) {
   int tag = 0;
   soc->do_tag(--tag);
   CDS_JAVA_HEAP_ONLY(Modules::serialize_archived_module_info(soc);)
+
+  // Propagate the merged-cache flag from Phase 1 (AOTMode=merge) to Phase 2
+  // (the forked child that assembles the final static archive). When writing
+  // the preimage, capture is_merging_aot_cache(); when reading it back in the
+  // child, restore the flag so populate_header() can embed it in the output.
+  bool is_merged = CDSConfig::is_merging_aot_cache();
+  soc->do_bool(&is_merged);
+  if (!soc->writing() && is_merged) {
+    CDSConfig::set_is_merged_cache(true);
+  }
+
   soc->do_tag(666);
 }
 
