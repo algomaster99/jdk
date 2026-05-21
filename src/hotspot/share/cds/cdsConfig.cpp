@@ -484,10 +484,6 @@ void CDSConfig::check_aot_flags() {
 }
 
 void CDSConfig::check_aotmode_merge() {
-  if (FLAG_IS_DEFAULT(AOTCache)) {
-    vm_exit_during_initialization("-XX:AOTMode=merge requires -XX:AOTCache to be specified");
-  }
-
   // enable merging mode
   _is_merging_aot_cache = true;
 
@@ -510,7 +506,7 @@ void CDSConfig::check_aotmode_merge() {
   RequireSharedSpaces = true;
 
   log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s AOTCacheOutput=%s AOTConfiguration=%s",
-                       AOTCache, AOTCacheOutput, AOTConfiguration);
+                       AOTCache != nullptr ? AOTCache : "(none)", AOTCacheOutput, AOTConfiguration);
 
   // Parse AOTMergeInputs into the _merge_input_paths array
   if (!FLAG_IS_DEFAULT(AOTMergeInputs) && AOTMergeInputs != nullptr) {
