@@ -273,8 +273,12 @@ void LambdaFormInvokers::read_static_archive_invokers() {
 }
 
 void LambdaFormInvokers::serialize(SerializeClosure* soc) {
-  // Probably this should not be done as this boosts performance
   if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
+    // Accumulate any invoker lines from the primary archive (if one was loaded)
+    // into _lambdaform_lines before we discard _static_archive_invokers from the
+    // preimage. Without this, the primary cache's recorded invoker signatures are
+    // silently lost and regenerate_holder_classes() produces no DMH/MH holders.
+    read_static_archive_invokers();
     _static_archive_invokers = nullptr;
   }
   soc->do_ptr(&_static_archive_invokers);

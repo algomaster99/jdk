@@ -48,5 +48,10 @@ class LambdaFormInvokers : public AllStatic {
   static void serialize(SerializeClosure* soc);
   static void cleanup_regenerated_classes();
   inline static bool may_be_regenerated_class(Symbol* name);
+  // Read-only accessor used by dump_archived_classlist to emit invoker lines into
+  // the per-secondary-cache classlist file.
+  static GrowableArrayCHeap<char*, mtClassShared>* lambdaform_lines() {
+    return _lambdaform_lines;
+  }
 };
 #endif // SHARE_CDS_LAMBDAFORMINVOKERS_HPP

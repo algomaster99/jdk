@@ -329,7 +329,11 @@ void MetaspaceShared::initialize_for_static_dump() {
 
 // Called in the helper VM (when -XX:AOTDumpArchivedClassList=<file> is set).
 // Writes the internal names of all archived classes to the specified file, one per line,
-// then exits immediately. Called from MetaspaceShared::post_initialize().
+// followed by any lambda-form invoker lines recorded in the cache (prefixed with
+// "@lambda-form-invoker "). The merge VM reads both back and uses the invoker lines
+// to drive regenerate_holder_classes(), producing the same DMH/MH hidden classes as
+// if the cache had been used as a primary (-XX:AOTCache).
+// Called from MetaspaceShared::post_initialize(); exits immediately after writing.
 static void dump_archived_classlist(const char* output_path) {
   fileStream fs(output_path);
   if (!fs.is_open()) {
@@ -349,6 +353,20 @@ static void dump_archived_classlist(const char* output_path) {
       fs.print_cr("%s", k->name()->as_C_string());
     }
   }
+
+  // Also emit lambda-form invoker lines so the merge VM can regenerate the same
+  // DMH/MH holder classes. LambdaFormInvokers::_static_archive_invokers is already
+  // mapped from the cache; read it into _lambdaform_lines and then write each line.
+  LambdaFormInvokers::read_static_archive_invokers();
+  GrowableArrayCHeap<char*, mtClassShared>* lf_lines = LambdaFormInvokers::lambdaform_lines();
+  if (lf_lines != nullptr) {
+    log_info(aot, merge)("Writing %d lambda-form invoker lines to %s",
+                         lf_lines->length(), output_path);
+    for (int i = 0; i < lf_lines->length(); i++) {
+      fs.print_cr("%s %s", ClassListParser::lambda_form_tag(), lf_lines->at(i));
+    }
+  }
+
   vm_direct_exit(0);
 }
 
@@ -2310,7 +2328,11 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
 
   int loaded = 0;
   int skipped = 0;
+  int lf_invokers = 0;
   char line[4096];
+  const char* lf_tag    = ClassListParser::lambda_form_tag();
+  const size_t lf_tag_len = strlen(lf_tag);
+
   while (fgets(line, sizeof(line), f) != nullptr) {
     // Strip trailing newline/carriage-return
     int len = (int)strlen(line);
@@ -2318,6 +2340,17 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
       line[--len] = '\0';
     }
     if (len == 0) continue;
+
+    // Handle "@lambda-form-invoker <descriptor>" lines emitted by dump_archived_classlist.
+    // Accumulate them into LambdaFormInvokers::_lambdaform_lines so that
+    // regenerate_holder_classes() can produce the same DMH/MH holder classes as the
+    // secondary cache originally contained.
+    if (strncmp(line, lf_tag, lf_tag_len) == 0 && line[lf_tag_len] == ' ') {
+      LambdaFormInvokers::append(os::strdup(line + lf_tag_len + 1, mtClassShared));
+      lf_invokers++;
+      log_debug(aot, merge)("  lambda-form invoker from secondary cache: %s", line + lf_tag_len + 1);
+      continue;
+    }
 
     TempNewSymbol sym = SymbolTable::new_symbol(line);
     // Try boot loader first, then app loader
@@ -2341,8 +2374,8 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
     }
   }
   fclose(f);
-  log_info(aot, merge)("Secondary classlist %s: loaded %d, skipped %d classes",
-                        classlist_path, loaded, skipped);
+  log_info(aot, merge)("Secondary classlist %s: loaded %d, skipped %d classes, %d lambda-form invokers",
+                        classlist_path, loaded, skipped, lf_invokers);
 }
 
 // For each secondary cache in CDSConfig::merge_input_paths(), fork a helper VM to extract
