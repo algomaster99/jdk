@@ -66,6 +66,9 @@
 #include "gc/shared/gcVMOperations.hpp"
 #include "interpreter/bytecodeStream.hpp"
 #include "interpreter/bytecodes.hpp"
+#include "interpreter/interpreterRuntime.hpp"
+#include "oops/cpCache.hpp"
+#include "oops/resolvedIndyEntry.hpp"
 #include "jvm_io.h"
 #include "logging/log.hpp"
 #include "logging/logMessage.hpp"
@@ -365,6 +368,32 @@ static void dump_archived_classlist(const char* output_path) {
     for (int i = 0; i < lf_lines->length(); i++) {
       fs.print_cr("%s %s", ClassListParser::lambda_form_tag(), lf_lines->at(i));
     }
+  }
+
+  // Emit @indy-preresolve lines for all archived classes that have invokedynamic
+  // entries. The merge VM will resolve these entries so they get recorded in
+  // FinalImageRecipes and re-resolved in the final assembly, generating lambda
+  // proxy classes (EventSetInfo$$Lambda, etc.) even without a primary cache.
+  {
+    int indy_lines = 0;
+    for (int i = 0; i < classes.length(); i++) {
+      Klass* k = classes.at(i);
+      if (!k->is_instance_klass()) continue;
+      InstanceKlass* ik = InstanceKlass::cast(k);
+      ConstantPool* cp = ik->constants();
+      if (cp == nullptr || cp->cache() == nullptr) continue;
+      Array<ResolvedIndyEntry>* indy_entries = cp->cache()->resolved_indy_entries();
+      if (indy_entries == nullptr || indy_entries->length() == 0) continue;
+
+      ResourceMark rm2;
+      fs.print("@indy-preresolve %s", ik->name()->as_C_string());
+      for (int j = 0; j < indy_entries->length(); j++) {
+        fs.print(" %d", j);
+      }
+      fs.cr();
+      indy_lines++;
+    }
+    log_info(aot, merge)("Writing @indy-preresolve for %d classes to %s", indy_lines, output_path);
   }
 
   vm_direct_exit(0);
@@ -2332,6 +2361,12 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
   char line[4096];
   const char* lf_tag    = ClassListParser::lambda_form_tag();
   const size_t lf_tag_len = strlen(lf_tag);
+  static const char* indy_tag = "@indy-preresolve";
+  static const size_t indy_tag_len = 16; // strlen("@indy-preresolve")
+
+  // Buffer for @indy-preresolve lines; applied after all classes are loaded so
+  // that any caller class referenced by an indy is guaranteed to be loaded first.
+  GrowableArrayCHeap<char*, mtClassShared> indy_lines(16);
 
   while (fgets(line, sizeof(line), f) != nullptr) {
     // Strip trailing newline/carriage-return
@@ -2349,6 +2384,12 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
       LambdaFormInvokers::append(os::strdup(line + lf_tag_len + 1, mtClassShared));
       lf_invokers++;
       log_debug(aot, merge)("  lambda-form invoker from secondary cache: %s", line + lf_tag_len + 1);
+      continue;
+    }
+
+    // Buffer @indy-preresolve lines for later processing.
+    if (strncmp(line, indy_tag, indy_tag_len) == 0 && line[indy_tag_len] == ' ') {
+      indy_lines.append(os::strdup(line, mtClassShared));
       continue;
     }
 
@@ -2374,8 +2415,78 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
     }
   }
   fclose(f);
-  log_info(aot, merge)("Secondary classlist %s: loaded %d, skipped %d classes, %d lambda-form invokers",
-                        classlist_path, loaded, skipped, lf_invokers);
+
+  // Apply buffered @indy-preresolve entries. For each class+index pair, call
+  // cds_resolve_invokedynamic() so the indy entry is resolved before
+  // FinalImageRecipes::record_recipes_for_constantpool() runs. Only deterministic
+  // BSMs (LambdaMetafactory, StringConcatFactory) are resolved; others are skipped.
+  int indy_resolved = 0;
+  for (int i = 0; i < indy_lines.length(); i++) {
+    char* entry = indy_lines.at(i);
+    char* rest = entry + indy_tag_len + 1;  // skip "@indy-preresolve "
+
+    // Parse class name (space-delimited token)
+    char* space = strchr(rest, ' ');
+    if (space == nullptr) {
+      os::free(entry);
+      continue;
+    }
+    *space = '\0';
+    const char* class_name = rest;
+    char* idx_ptr = space + 1;
+
+    // Look up the class (must already be loaded from the lines above)
+    TempNewSymbol sym = SymbolTable::new_symbol(class_name);
+    Klass* k = SystemDictionary::find_instance_klass(THREAD, sym, Handle());
+    if (k == nullptr || !k->is_instance_klass()) {
+      os::free(entry);
+      continue;
+    }
+    InstanceKlass* ik = InstanceKlass::cast(k);
+    if (!ik->is_linked()) {
+      os::free(entry);
+      continue;
+    }
+    ConstantPool* cp_raw = ik->constants();
+    if (cp_raw == nullptr || cp_raw->cache() == nullptr) {
+      os::free(entry);
+      continue;
+    }
+    constantPoolHandle cp(THREAD, cp_raw);
+    Array<ResolvedIndyEntry>* indy_entries = cp->cache()->resolved_indy_entries();
+    if (indy_entries == nullptr) {
+      os::free(entry);
+      continue;
+    }
+
+    // Parse and apply each indy array index
+    while (*idx_ptr != '\0') {
+      char* end;
+      int raw_index = (int)strtol(idx_ptr, &end, 10);
+      if (end == idx_ptr) break;
+      idx_ptr = end;
+      while (*idx_ptr == ' ') idx_ptr++;
+
+      if (raw_index < 0 || raw_index >= indy_entries->length()) continue;
+      ResolvedIndyEntry* rie = indy_entries->adr_at(raw_index);
+      if (rie->is_resolved()) continue;  // already done (e.g. loaded earlier)
+
+      int cp_index = rie->constant_pool_index();
+      if (!AOTConstantPoolResolver::is_indy_resolution_deterministic(cp(), cp_index)) continue;
+
+      InterpreterRuntime::cds_resolve_invokedynamic(raw_index, cp, THREAD);
+      if (HAS_PENDING_EXCEPTION) {
+        CLEAR_PENDING_EXCEPTION;
+      } else {
+        indy_resolved++;
+        log_debug(aot, merge)("  pre-resolved indy [%d] in %s", raw_index, class_name);
+      }
+    }
+    os::free(entry);
+  }
+
+  log_info(aot, merge)("Secondary classlist %s: loaded %d, skipped %d classes, %d lambda-form invokers, %d indy pre-resolved",
+                        classlist_path, loaded, skipped, lf_invokers, indy_resolved);
 }
 
 // For each secondary cache in CDSConfig::merge_input_paths(), fork a helper VM to extract
