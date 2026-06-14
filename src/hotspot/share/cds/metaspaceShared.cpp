@@ -2471,9 +2471,11 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
       ResolvedIndyEntry* rie = indy_entries->adr_at(raw_index);
       if (rie->is_resolved()) continue;  // already done (e.g. loaded earlier)
 
-      int cp_index = rie->constant_pool_index();
-      if (!AOTConstantPoolResolver::is_indy_resolution_deterministic(cp(), cp_index)) continue;
-
+      // Do NOT gate on is_indy_resolution_deterministic here: that function
+      // returns false unconditionally outside is_dumping_invokedynamic() (i.e.
+      // final-assembly phase). We call the bootstrap directly and rely on
+      // exception-clearing to skip non-deterministic BSMs. The final assembly's
+      // own is_indy_resolution_deterministic check protects the output.
       InterpreterRuntime::cds_resolve_invokedynamic(raw_index, cp, THREAD);
       if (HAS_PENDING_EXCEPTION) {
         CLEAR_PENDING_EXCEPTION;
