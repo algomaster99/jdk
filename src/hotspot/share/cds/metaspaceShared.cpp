@@ -2435,9 +2435,13 @@ static void load_and_link_classes_from_secondary_classlist(const char* classlist
     const char* class_name = rest;
     char* idx_ptr = space + 1;
 
-    // Look up the class (must already be loaded from the lines above)
+    // Look up the class (must already be loaded from the lines above).
+    // Try bootstrap loader first (JDK classes), then system loader (app classes).
     TempNewSymbol sym = SymbolTable::new_symbol(class_name);
     Klass* k = SystemDictionary::find_instance_klass(THREAD, sym, Handle());
+    if (k == nullptr) {
+      k = SystemDictionary::find_instance_klass(THREAD, sym, sys_loader);
+    }
     if (k == nullptr || !k->is_instance_klass()) {
       os::free(entry);
       continue;
