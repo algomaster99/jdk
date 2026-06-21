@@ -217,6 +217,10 @@ public:
     return _runtime_instance;
   }
 
+  static bool has_runtime_instance() {
+    return _runtime_instance != nullptr;
+  }
+
   // Common accessors
   int boot_cp_start_index()          const { return 1; }
   int boot_cp_end_index()            const { return _boot_classpath_end; }

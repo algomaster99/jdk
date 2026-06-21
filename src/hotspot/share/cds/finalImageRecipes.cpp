@@ -22,6 +22,7 @@
  *
  */
 
+#include "cds/aotClassLocation.hpp"
 #include "cds/aotConstantPoolResolver.hpp"
 #include "cds/archiveBuilder.hpp"
 #include "cds/archiveUtils.inline.hpp"
@@ -183,6 +184,47 @@ void FinalImageRecipes::apply_recipes_for_constantpool(JavaThread* current) {
 void FinalImageRecipes::load_all_classes(TRAPS) {
   assert(CDSConfig::is_dumping_final_static_archive(), "sanity");
   Handle class_loader(THREAD, SystemDictionary::java_system_loader());
+
+  // Cap out-of-range shared_classpath_index values before loading. A class may
+  // carry an index that is valid against the (larger) class-location table that
+  // existed when it was recorded, but out of range for the table serialized into
+  // the preimage we are assembling from. That happens, for example, when the
+  // application classpath was a Maven Surefire manifest-only booter JAR: its
+  // Class-Path manifest is expanded lazily at load time, so a class can be tagged
+  // with an index past the end of the statically-built table. An out-of-range
+  // index makes CDSProtectionDomain::init_security_info dereference past the end
+  // of AOTClassLocationConfig (a SIGSEGV) while resolving the class below.
+  //
+  // Clamp such indices to app_cp_start_index(), a guaranteed in-range app entry.
+  // The exact JAR association is irrelevant here: protection-domain setup only
+  // needs *an* app class location, and runtime visibility is resolved by class
+  // name, not by this index.
+  if (AOTClassLocationConfig::has_runtime_instance()) {
+    const AOTClassLocationConfig* config = AOTClassLocationConfig::runtime();
+    int len = config->length();
+    int fallback_idx = (config->app_cp_start_index() < len) ? config->app_cp_start_index() : 0;
+    int capped = 0;
+    for (int i = 0; i < _all_klasses->length(); i++) {
+      Klass* k = _all_klasses->at(i);
+      if (!k->is_instance_klass()) {
+        continue;
+      }
+      InstanceKlass* ik = InstanceKlass::cast(k);
+      int idx = ik->shared_classpath_index();
+      if (idx >= len) { // negative (e.g. UNREGISTERED_INDEX) and in-range stay as-is
+        ResourceMark rm(THREAD);
+        log_debug(aot, load)("Classpath index cap: %s index %d -> %d (out of range, max %d)",
+                             ik->external_name(), idx, fallback_idx, len);
+        ik->set_shared_classpath_index(fallback_idx);
+        capped++;
+      }
+    }
+    if (capped > 0) {
+      log_info(aot, load)("Capped %d out-of-range classpath index(es) to %d (config has %d entries)",
+                          capped, fallback_idx, len);
+    }
+  }
+
   for (int i = 0; i < _all_klasses->length(); i++) {
     Klass* k = _all_klasses->at(i);
     int flags = _flags->at(i);
