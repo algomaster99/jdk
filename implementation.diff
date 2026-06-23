@@ -1,0 +1,2440 @@
+diff --git a/src/hotspot/share/cds/aotClassLinker.cpp b/src/hotspot/share/cds/aotClassLinker.cpp
+index 47c7f6e3bf8..7096ef80626 100644
+--- a/src/hotspot/share/cds/aotClassLinker.cpp
++++ b/src/hotspot/share/cds/aotClassLinker.cpp
+@@ -23,6 +23,7 @@
+  */
+ 
+ #include "cds/aotClassLinker.hpp"
++#include "cds/aotClassLocation.hpp"
+ #include "cds/aotConstantPoolResolver.hpp"
+ #include "cds/aotLinkedClassTable.hpp"
+ #include "cds/archiveBuilder.hpp"
+@@ -119,6 +120,63 @@ void AOTClassLinker::add_new_candidate(InstanceKlass* ik) {
+   }
+ }
+ 
++bool AOTClassLinker::should_seed_candidate(InstanceKlass* ik) {
++  if (is_vm_class(ik)) {
++    return true;
++  }
++
++  if (ik->class_loader_data() == nullptr) {
++    if (log_is_enabled(Info, aot, link)) {
++      ResourceMark rm;
++      log_info(aot, link)("skipped %s (class loader data is null)", ik->external_name());
++    }
++    return false;
++  }
++
++  if (ik->is_hidden()) {
++    if (log_is_enabled(Info, aot, link)) {
++      ResourceMark rm;
++      log_info(aot, link)("skipped %s (hidden class)", ik->external_name());
++    }
++    return false;
++  }
++
++  oop loader = ik->class_loader();
++
++  // Boot-loader classes are JDK infrastructure (e.g. DelegatingMethodHandle$Holder,
++  // BoundMethodHandle$Species_*). They must still be seeded so that the AOT-linked
++  // class table is populated and their interpreter entries are set up correctly when
++  // the cache is loaded. Filtering them out here breaks method-handle dispatch.
++  if (loader == nullptr) {
++    if (SystemDictionaryShared::is_builtin(ik)) {
++      return true;
++    }
++    if (log_is_enabled(Info, aot, link)) {
++      ResourceMark rm;
++      log_info(aot, link)("skipped %s (boot-loader class is not built in)", ik->external_name());
++    }
++    return false;
++  }
++
++  // For the system (app) class loader, only seed classes that actually live on the
++  // current application classpath — this is the supply-chain safety check.
++  if (loader != SystemDictionary::java_system_loader()) {
++    if (log_is_enabled(Info, aot, link)) {
++      ResourceMark rm;
++      log_info(aot, link)("skipped %s (not loaded by the system class loader)", ik->external_name());
++    }
++    return false;
++  }
++
++  ResourceMark rm;
++  if (AOTClassLocationConfig::is_class_in_current_classpath(ik->name()->as_C_string())) {
++    return true;
++  }
++  log_info(aot, link)("skipped %s (not on current application classpath)",
++                      ik->external_name());
++  return false;
++}
++
+ // ik is a candidate for aot-linking; see if it can really work
+ // that way, and return success or failure. Not only must ik itself
+ // look like a class that can be aot-linked but its supers must also be
+@@ -176,13 +234,23 @@ bool AOTClassLinker::try_add_candidate(InstanceKlass* ik) {
+ void AOTClassLinker::add_candidates() {
+   assert_at_safepoint();
+   if (CDSConfig::is_dumping_aot_linked_classes()) {
++    int seeded = 0;
++    int skipped = 0;
+     GrowableArray<Klass*>* klasses = ArchiveBuilder::current()->klasses();
+     for (GrowableArrayIterator<Klass*> it = klasses->begin(); it != klasses->end(); ++it) {
+       Klass* k = *it;
+       if (k->is_instance_klass()) {
+-        try_add_candidate(InstanceKlass::cast(k));
++        InstanceKlass* ik = InstanceKlass::cast(k);
++        if (should_seed_candidate(ik)) {
++          seeded++;
++          try_add_candidate(ik);
++        } else {
++          skipped++;
++        }
+       }
+     }
++    log_info(aot, link)("seeded %d class(es), skipped %d class(es) that did not satisfy AOT seed conditions",
++                        seeded, skipped);
+   }
+ }
+ 
+diff --git a/src/hotspot/share/cds/aotClassLinker.hpp b/src/hotspot/share/cds/aotClassLinker.hpp
+index f15684a1ad2..0cd9315e36f 100644
+--- a/src/hotspot/share/cds/aotClassLinker.hpp
++++ b/src/hotspot/share/cds/aotClassLinker.hpp
+@@ -84,6 +84,7 @@ class AOTClassLinker :  AllStatic {
+ 
+   static void add_vm_class(InstanceKlass* ik);
+   static void add_new_candidate(InstanceKlass* ik);
++  static bool should_seed_candidate(InstanceKlass* ik);
+ 
+   static Array<InstanceKlass*>* write_classes(oop class_loader, bool is_javabase);
+   static int count_public_classes(oop loader);
+diff --git a/src/hotspot/share/cds/aotClassLocation.cpp b/src/hotspot/share/cds/aotClassLocation.cpp
+index b662c5a1b47..3002d00da7a 100644
+--- a/src/hotspot/share/cds/aotClassLocation.cpp
++++ b/src/hotspot/share/cds/aotClassLocation.cpp
+@@ -42,6 +42,7 @@
+ #include "oops/objArrayKlass.hpp"
+ #include "runtime/arguments.hpp"
+ #include "utilities/classpathStream.hpp"
++#include "utilities/zipLibrary.hpp"
+ #include "utilities/formatBuffer.hpp"
+ #include "utilities/stringUtils.hpp"
+ 
+@@ -405,10 +406,6 @@ bool AOTClassLocation::check(const char* runtime_path, bool has_aot_linked_class
+       aot_log_warning(aot)("'%s' must be a file", runtime_path);
+       return false;
+     }
+-    if (!os::dir_is_empty(runtime_path)) {
+-      aot_log_warning(aot)("directory is not empty: '%s'", runtime_path);
+-      return false;
+-    }
+   } else {
+     if (_file_type == FileType::NOT_EXIST) {
+       aot_log_warning(aot)("'%s' must not exist", runtime_path);
+@@ -622,10 +619,25 @@ void AOTClassLocationConfig::add_class_location(JavaThread* current, GrowableCla
+       size_t name_len = strlen(file_start);
+       if (name_len > 0) {
+         ResourceMark rm(current);
+-        size_t libname_len = dir_len + name_len;
+-        char* libname = NEW_RESOURCE_ARRAY(char, libname_len + 1);
+-        int n = os::snprintf(libname, libname_len + 1, "%.*s%s", dir_len, dir_name, file_start);
+-        assert((size_t)n == libname_len, "Unexpected number of characters in string");
++        char* libname;
++        // fix "/target/surefire/file:/home/aman/.../target/classes/"  ← bogus
++        if (strncmp(file_start, "file:", 5) == 0) {
++          // Absolute file: URL (e.g. used by Maven Surefire in Class-Path manifest entries).
++          // Convert the URI to a plain path instead of prepending the JAR's directory.
++          libname = ClassLoader::uri_to_path(file_start);
++        } else {
++          size_t libname_len = dir_len + name_len;
++          libname = NEW_RESOURCE_ARRAY(char, libname_len + 1);
++          int n = os::snprintf(libname, libname_len + 1, "%.*s%s", dir_len, dir_name, file_start);
++          assert((size_t)n == libname_len, "Unexpected number of characters in string");
++        }
++
++        // Skip test-classes directories (e.g. Maven's target/test-classes/).
++        bool found_test_class = false;
++        if (strstr(libname, "/target/test-classes") != nullptr) {
++          aot_log_warning(aot)("Skipping Class-Path entry '%s' because it may contain test classes", libname);
++          found_test_class = true;
++        }
+ 
+         // Avoid infinite recursion when two JAR files refer to each
+         // other via cpattr.
+@@ -636,7 +648,7 @@ void AOTClassLocationConfig::add_class_location(JavaThread* current, GrowableCla
+             break;
+           }
+         }
+-        if (!found_duplicate) {
++        if (!found_duplicate && !found_test_class) {
+           add_class_location(current, tmp_array, libname, group, parse_manifest, /*from_cpattr*/true);
+         }
+       }
+@@ -692,16 +704,11 @@ void AOTClassLocationConfig::check_nonempty_dirs() const {
+     }
+     if (cs->is_dir()) {
+       if (!os::dir_is_empty(cs->path())) {
+-        aot_log_error(aot)("Error: non-empty directory '%s'", cs->path());
+         has_nonempty_dir = true;
+       }
+     }
+     return true; // keep iterating
+   });
+-
+-  if (has_nonempty_dir) {
+-    vm_exit_during_cds_dumping("Cannot have non-empty directory in paths", nullptr);
+-  }
+ }
+ 
+ // It's possible to use reflection+setAccessible to call into ClassLoader::defineClass() to
+@@ -1003,12 +1010,6 @@ bool AOTClassLocationConfig::validate(const char* cache_filename, bool has_aot_l
+                                use_lcp_match, runtime_lcp, runtime_lcp_len);
+     log_info(class, path)("Archived boot classpath validation: %s", success ? "passed" : "failed");
+ 
+-    if (success && need_to_check_app_classpath()) {
+-      success = check_classpaths(false, has_aot_linked_classes, app_cp_start_index(), app_cp_end_index(), all_css.app_cp(),
+-                                 use_lcp_match, runtime_lcp, runtime_lcp_len);
+-      log_info(class, path)("Archived app classpath validation: %s", success ? "passed" : "failed");
+-    }
+-
+     if (success) {
+       success = check_module_paths(has_aot_linked_classes, module_path_start_index(), module_path_end_index(),
+                                    all_css.module_path(), has_extra_module_paths);
+@@ -1023,6 +1024,9 @@ bool AOTClassLocationConfig::validate(const char* cache_filename, bool has_aot_l
+ 
+   if (success) {
+     _runtime_instance = this;
++  } else if (CDSConfig::is_merging_aot_cache()) {
++    return true;
++
+   } else {
+     const char* mismatch_msg = "shared class paths mismatch";
+     const char* hint_msg = log_is_enabled(Info, class, path) ?
+@@ -1043,6 +1047,171 @@ bool AOTClassLocationConfig::validate(const char* cache_filename, bool has_aot_l
+   return success;
+ }
+ 
++bool AOTClassLocationConfig::is_archived_class_visible_on_classpath(int shared_classpath_index) {
++  // Access the archived config to determine class origin.
++  // Use _runtime_instance if available, otherwise fall back to FileMapInfo.
++  const AOTClassLocationConfig* archived_config = _runtime_instance;
++  if (archived_config == nullptr) {
++    FileMapInfo* mapinfo = FileMapInfo::current_info();
++    if (mapinfo == nullptr) {
++      return true;
++    }
++    archived_config = mapinfo->header()->class_location_config();
++    if (archived_config == nullptr) {
++      return true;
++    }
++  }
++
++  // Boot/platform classes are always visible (from modules image)
++  if (shared_classpath_index < archived_config->app_cp_start_index()) {
++    return true;
++  }
++
++  // Bounds check: in merged caches, classes from input archives may have classpath
++  // indices that exceed the merged config's entries. These classes are still in the
++  // archive but should not be loaded since their source JAR is unknown in this config.
++  int num_locations = archived_config->class_locations()->length();
++  if (shared_classpath_index >= num_locations) {
++    log_info(class, path)("Archived class not visible: classpath index %d exceeds config size %d",
++                          shared_classpath_index, num_locations);
++    return false;
++  }
++
++  // Module path classes: allow for now
++  if (shared_classpath_index >= archived_config->app_cp_end_index()) {
++    return true;
++  }
++
++  // App classpath class: check if the source JAR exists on the current classpath
++  const AOTClassLocation* loc = archived_config->class_location_at(shared_classpath_index);
++  const char* archived_path = loc->path();
++
++  const char* current_app_cp = Arguments::get_appclasspath();
++  if (current_app_cp == nullptr || current_app_cp[0] == '\0') {
++    log_debug(class, path)("Archived class from %s not visible: empty app classpath", archived_path);
++    return false;
++  }
++
++  // Parse and check each entry in the current app classpath
++  const char* start = current_app_cp;
++  while (*start != '\0') {
++    const char* end = strchr(start, os::path_separator()[0]);
++    size_t len = (end != nullptr) ? (size_t)(end - start) : strlen(start);
++    if (len > 0) {
++      char entry[JVM_MAXPATHLEN];
++      if (len < sizeof(entry)) {
++        memcpy(entry, start, len);
++        entry[len] = '\0';
++        if (os::same_files(archived_path, entry)) {
++          return true;
++        }
++      }
++    }
++    if (end == nullptr) break;
++    start = end + 1;
++  }
++
++  log_debug(class, path)("Archived class from %s: source JAR not on current classpath (will check by class name)", archived_path);
++  return false;
++}
++
++// Cached classpath entries for is_class_in_current_classpath().
++// Avoids re-opening JAR files on every call.
++struct CachedCPEntry {
++  char path[JVM_MAXPATHLEN];
++  bool is_dir;
++  jzfile* zip;  // non-null only for JAR files
++};
++static CachedCPEntry* _cached_cp_entries = nullptr;
++static int _cached_cp_entry_count = 0;
++
++static void init_cached_cp_entries() {
++  if (_cached_cp_entries != nullptr) return;
++
++  const char* current_app_cp = Arguments::get_appclasspath();
++  if (current_app_cp == nullptr || current_app_cp[0] == '\0') return;
++
++  // Count entries first
++  int count = 0;
++  const char* s = current_app_cp;
++  while (*s != '\0') {
++    count++;
++    const char* e = strchr(s, os::path_separator()[0]);
++    if (e == nullptr) break;
++    s = e + 1;
++  }
++
++  _cached_cp_entries = NEW_C_HEAP_ARRAY(CachedCPEntry, count, mtClassShared);
++  _cached_cp_entry_count = 0;
++
++  s = current_app_cp;
++  while (*s != '\0') {
++    const char* e = strchr(s, os::path_separator()[0]);
++    size_t len = (e != nullptr) ? (size_t)(e - s) : strlen(s);
++    if (len > 0 && len < JVM_MAXPATHLEN) {
++      CachedCPEntry* entry = &_cached_cp_entries[_cached_cp_entry_count];
++      memcpy(entry->path, s, len);
++      entry->path[len] = '\0';
++      entry->zip = nullptr;
++      entry->is_dir = false;
++
++      struct stat st;
++      if (os::stat(entry->path, &st) == 0) {
++        if (S_ISDIR(st.st_mode)) {
++          entry->is_dir = true;
++        } else {
++          char* pmsg = nullptr;
++          entry->zip = (jzfile*)ZipLibrary::open(entry->path, &pmsg);
++        }
++        _cached_cp_entry_count++;
++      }
++    }
++    if (e == nullptr) break;
++    s = e + 1;
++  }
++}
++
++bool AOTClassLocationConfig::is_class_in_current_classpath(const char* class_name) {
++  init_cached_cp_entries();
++  if (_cached_cp_entries == nullptr || _cached_cp_entry_count == 0) {
++    return false;
++  }
++
++  // Build .class file path from internal class name (e.g., "org/foo/Bar" -> "org/foo/Bar.class")
++  size_t name_len = strlen(class_name);
++  size_t path_len = name_len + 6 + 1; // ".class" + null
++  if (path_len > JVM_MAXPATHLEN) return false;
++
++  char class_file[JVM_MAXPATHLEN];
++  memcpy(class_file, class_name, name_len);
++  memcpy(class_file + name_len, ".class", 7); // includes null terminator
++
++  for (int i = 0; i < _cached_cp_entry_count; i++) {
++    CachedCPEntry* cp_entry = &_cached_cp_entries[i];
++    if (cp_entry->is_dir) {
++      // Directory: check if class file exists
++      char full_path[JVM_MAXPATHLEN];
++      int written = snprintf(full_path, sizeof(full_path), "%s/%s", cp_entry->path, class_file);
++      if (written > 0 && (size_t)written < sizeof(full_path)) {
++        struct stat file_st;
++        if (os::stat(full_path, &file_st) == 0) {
++          return true;
++        }
++      }
++    } else if (cp_entry->zip != nullptr) {
++      // JAR: check if class file entry exists using cached handle
++      jint size = 0;
++      jint name_len_out = 0;
++      jzentry* ze = ZipLibrary::find_entry(cp_entry->zip, class_file, &size, &name_len_out);
++      if (ze != nullptr) {
++        ZipLibrary::free_entry(cp_entry->zip, ze);
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
+ void AOTClassLocationConfig::log_locations(const char* cache_filename, bool is_write) const {
+   if (log_is_enabled(Info, class, path)) {
+     LogStreamHandle(Info, class, path) st;
+diff --git a/src/hotspot/share/cds/aotClassLocation.hpp b/src/hotspot/share/cds/aotClassLocation.hpp
+index 460788930a4..e4d212f8a3a 100644
+--- a/src/hotspot/share/cds/aotClassLocation.hpp
++++ b/src/hotspot/share/cds/aotClassLocation.hpp
+@@ -269,6 +269,18 @@ class AOTClassLocationConfig : public CHeapObj<mtClassShared> {
+ 
+   AOTClassLocationConfig* write_to_archive() const;
+ 
++  static bool has_runtime_instance() {
++    return _runtime_instance != nullptr;
++  }
++
++  // Takes in the index of jar in the classpath and then tries to find it
++  // If it is not there, then we fallback to is_class_in_current_classpath
++  static bool is_archived_class_visible_on_classpath(int shared_classpath_index);
++
++  // We construct class name org/apache/fontbox/ttf/TrueTypeFont -> org/apache/fontbox/ttf/TrueTypeFont.class
++  // and then look for it in the jars
++  static bool is_class_in_current_classpath(const char* class_name);
++
+   // Functions used only during runtime
+   bool validate(const char* cache_filename, bool has_aot_linked_classes, bool* has_extra_module_paths) const;
+ 
+diff --git a/src/hotspot/share/cds/aotConstantPoolResolver.cpp b/src/hotspot/share/cds/aotConstantPoolResolver.cpp
+index 6ab63418e09..06e00b0a3b1 100644
+--- a/src/hotspot/share/cds/aotConstantPoolResolver.cpp
++++ b/src/hotspot/share/cds/aotConstantPoolResolver.cpp
+@@ -85,8 +85,17 @@ bool AOTConstantPoolResolver::is_class_resolution_deterministic(InstanceKlass* c
+   if (resolved_class->is_instance_klass()) {
+     InstanceKlass* ik = InstanceKlass::cast(resolved_class);
+ 
+-    if (!ik->is_shared() && SystemDictionaryShared::is_excluded_class(ik)) {
+-      return false;
++     if (!ik->is_shared()) {
++      // In merge mode, only classes explicitly added to classes_for_merged_aot_cache have a
++      // DumpTimeClassInfo. A class reachable only via ConstantPool resolution (e.g.
++      // java.lang.reflect.Proxy referenced by a method entry) may have no entry
++      if (CDSConfig::is_merging_aot_cache() &&
++          SystemDictionaryShared::dumptime_table()->get(ik) == nullptr) {
++        return false;
++      }
++      if (SystemDictionaryShared::is_excluded_class(ik)) {
++        return false;
++      }
+     }
+ 
+     if (cp_holder->is_subtype_of(ik)) {
+@@ -104,6 +113,11 @@ bool AOTConstantPoolResolver::is_class_resolution_deterministic(InstanceKlass* c
+         return false;
+       }
+     } else if (AOTClassLinker::is_vm_class(ik)) {
++      if (cp_holder->class_loader_data() == nullptr || ik->class_loader_data() == nullptr) {
++        // Shared class from input archive not loaded during this merge/assembly phase.
++        // Use loader-type flags instead of class_loader_data() to check loader equality.
++        return cp_holder->defined_by_boot_loader() && ik->defined_by_boot_loader();
++      }
+       if (ik->class_loader() != cp_holder->class_loader()) {
+         // At runtime, cp_holder() may not be able to resolve to the same
+         // ik. For example, a different version of ik may be defined in
+diff --git a/src/hotspot/share/cds/aotLinkedClassBulkLoader.cpp b/src/hotspot/share/cds/aotLinkedClassBulkLoader.cpp
+index 70339a12110..44e341af091 100644
+--- a/src/hotspot/share/cds/aotLinkedClassBulkLoader.cpp
++++ b/src/hotspot/share/cds/aotLinkedClassBulkLoader.cpp
+@@ -24,6 +24,7 @@
+ 
+ #include "cds/aotClassInitializer.hpp"
+ #include "cds/aotClassLinker.hpp"
++#include "cds/aotClassLocation.hpp"
+ #include "cds/aotLinkedClassBulkLoader.hpp"
+ #include "cds/aotLinkedClassTable.hpp"
+ #include "cds/cdsConfig.hpp"
+@@ -77,6 +78,15 @@ void AOTLinkedClassBulkLoader::load_non_javabase_classes(JavaThread* current) {
+ void AOTLinkedClassBulkLoader::load_classes_in_loader(JavaThread* current, AOTLinkedClassCategory class_category, oop class_loader_oop) {
+   load_classes_in_loader_impl(class_category, class_loader_oop, current);
+   if (current->has_pending_exception()) {
++    // We don't care about loading classes from cache
++    // get_archived_classes is sufficient
++    if (CDSConfig::has_merge_inputs() && class_category == AOTLinkedClassCategory::APP) {
++      ResourceMark rm(current);
++      log_info(aot)("Ignoring AOT-linked app class loading failure during supply-chain merge: %s",
++                    current->pending_exception()->klass()->external_name());
++      current->clear_pending_exception();
++      return;
++    }
+     // We cannot continue, as we might have loaded some of the aot-linked classes, which
+     // may have dangling C++ pointers to other aot-linked classes that we have failed to load.
+     exit_on_exception(current);
+@@ -179,6 +189,60 @@ void AOTLinkedClassBulkLoader::load_classes_impl(AOTLinkedClassCategory class_ca
+ 
+   for (int i = 0; i < classes->length(); i++) {
+     InstanceKlass* ik = classes->at(i);
++
++    // If some classes are not on classpath, then avoid loading it from archive
++    // For example, a surefire class would never be invoked anyway in production eventhough
++    // it is in the archive.
++    if (class_category == AOTLinkedClassCategory::APP && !ik->is_loaded()
++        && !CDSConfig::is_dumping_final_static_archive()) {
++      if (ik->is_hidden()) {
++        // Hidden classes (lambda proxies) depend on their nest host. If the nest
++        // host was skipped, we must skip the hidden class too to avoid crashes.
++        if (HeapShared::is_lambda_proxy_klass(ik)) {
++          InstanceKlass* nest_host = ik->nest_host_not_null();
++          if (!nest_host->is_loaded()) {
++            ResourceMark rm(THREAD);
++            log_info(aot, load)("%-5s %s (skipped: nest host not loaded)", category_name, ik->external_name());
++            continue;
++          }
++          // Also skip if any local interface is not yet loaded. An unloaded
++          // interface has null class_loader_data and may have its _implementor
++          // field set to itself (multiple-implementors sentinel) by earlier
++          // classes. Calling add_to_hierarchy on this lambda would then invoke
++          // implementor() -> is_loader_alive() -> class_loader_data()->is_alive()
++          // on the uninitialized interface, causing a SIGSEGV.
++          bool any_intf_unloaded = false;
++          for (int j = 0; j < ik->local_interfaces()->length(); j++) {
++            if (!ik->local_interfaces()->at(j)->is_loaded()) {
++              any_intf_unloaded = true;
++              break;
++            }
++          }
++          if (any_intf_unloaded) {
++            ResourceMark rm(THREAD);
++            log_info(aot, load)("%-5s %s (skipped: interface not loaded)", category_name, ik->external_name());
++            continue;
++          }
++        }
++      } else if (CDSConfig::is_merged_cache()) {
++        // Merged cache: defer named APP classes to on-demand loading via
++        // SystemDictionaryShared::find_or_load_shared_class(). Hidden classes
++        // (lambda proxies, LambdaForms) are handled above and still load eagerly
++        // because they cannot be resolved by name.
++        ResourceMark rm(THREAD);
++        log_info(aot, load)("%-5s %s (deferred: merged cache lazy mode)", category_name, ik->external_name());
++        continue;
++      } else if (!AOTClassLocationConfig::is_archived_class_visible_on_classpath(ik->shared_classpath_index())) {
++        // Path didn't match — check if the class file exists on the classpath (fat JAR case)
++        ResourceMark rm(THREAD);
++        const char* class_name = ik->name()->as_C_string();
++        if (!AOTClassLocationConfig::is_class_in_current_classpath(class_name)) {
++          log_info(aot, load)("%-5s %s (skipped: not on current classpath)", category_name, ik->external_name());
++          continue;
++        }
++      }
++    }
++
+     if (log_is_enabled(Info, aot, load)) {
+       ResourceMark rm(THREAD);
+       log_info(aot, load)("%-5s %s%s%s", category_name, ik->external_name(),
+diff --git a/src/hotspot/share/cds/aotLinkedClassTable.cpp b/src/hotspot/share/cds/aotLinkedClassTable.cpp
+index b602c599f54..96621c7d93c 100644
+--- a/src/hotspot/share/cds/aotLinkedClassTable.cpp
++++ b/src/hotspot/share/cds/aotLinkedClassTable.cpp
+@@ -31,6 +31,13 @@ AOTLinkedClassTable AOTLinkedClassTable::_for_static_archive;
+ AOTLinkedClassTable AOTLinkedClassTable::_for_dynamic_archive;
+ 
+ void AOTLinkedClassTable::serialize(SerializeClosure* soc) {
++  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
++    // In merge mode, these arrays contain stale pointers from the old archive.
++    _boot = nullptr;
++    _boot2 = nullptr;
++    _platform = nullptr;
++    _app = nullptr;
++  }
+   soc->do_ptr((void**)&_boot);
+   soc->do_ptr((void**)&_boot2);
+   soc->do_ptr((void**)&_platform);
+diff --git a/src/hotspot/share/cds/archiveBuilder.cpp b/src/hotspot/share/cds/archiveBuilder.cpp
+index 11e7e4e9ed4..a05efe8f395 100644
+--- a/src/hotspot/share/cds/archiveBuilder.cpp
++++ b/src/hotspot/share/cds/archiveBuilder.cpp
+@@ -513,6 +513,24 @@ void ArchiveBuilder::gather_source_objs() {
+ bool ArchiveBuilder::is_excluded(Klass* klass) {
+   if (klass->is_instance_klass()) {
+     InstanceKlass* ik = InstanceKlass::cast(klass);
++    if (CDSConfig::is_merging_aot_cache() && ik->is_shared() && ik->class_loader_data() == nullptr) {
++      // Shared class from input archive not loaded during this merge run.
++      DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(ik);
++      if (info == nullptr) {
++        info = SystemDictionaryShared::dumptime_table()->allocate_info(ik);
++      }
++      return info->is_excluded();
++    }
++    if (CDSConfig::is_merging_aot_cache() || CDSConfig::is_dumping_final_static_archive()) {
++      // A class reachable via ConstantPool pointer-following (e.g. a dynamically generated
++      // proxy class) may have no DumpTimeClassInfo if it was excluded before init_dumptime_info()
++      // was called, or is not on the application classpath in create mode. Treat it as excluded
++      // so the pointer is set_to_null rather than crashing in get_info_locked().
++      DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(ik);
++      if (info == nullptr) {
++        return true;
++      }
++    }
+     return SystemDictionaryShared::is_excluded_class(ik);
+   } else if (klass->is_objArray_klass()) {
+     Klass* bottom = ObjArrayKlass::cast(klass)->bottom_klass();
+@@ -520,7 +538,21 @@ bool ArchiveBuilder::is_excluded(Klass* klass) {
+       // The bottom class is in the static archive so it's clearly not excluded.
+       return false;
+     } else if (bottom->is_instance_klass()) {
+-      return SystemDictionaryShared::is_excluded_class(InstanceKlass::cast(bottom));
++      InstanceKlass* bottom_ik = InstanceKlass::cast(bottom);
++      if (CDSConfig::is_merging_aot_cache() && bottom_ik->is_shared() && bottom_ik->class_loader_data() == nullptr) {
++        DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(bottom_ik);
++        if (info == nullptr) {
++          info = SystemDictionaryShared::dumptime_table()->allocate_info(bottom_ik);
++        }
++        return info->is_excluded();
++      }
++      if (CDSConfig::is_merging_aot_cache()) {
++        DumpTimeClassInfo* info = SystemDictionaryShared::dumptime_table()->get(bottom_ik);
++        if (info == nullptr) {
++          return true;
++        }
++      }
++      return SystemDictionaryShared::is_excluded_class(bottom_ik);
+     }
+   }
+ 
+diff --git a/src/hotspot/share/cds/cdsConfig.cpp b/src/hotspot/share/cds/cdsConfig.cpp
+index 2ea07198f90..2fe89d56172 100644
+--- a/src/hotspot/share/cds/cdsConfig.cpp
++++ b/src/hotspot/share/cds/cdsConfig.cpp
+@@ -38,7 +38,9 @@
+ #include "runtime/arguments.hpp"
+ #include "runtime/globals_extension.hpp"
+ #include "runtime/java.hpp"
++#include "runtime/os.hpp"
+ #include "runtime/vmThread.hpp"
++#include "utilities/growableArray.hpp"
+ #include "utilities/defaultStream.hpp"
+ #include "utilities/formatBuffer.hpp"
+ 
+@@ -50,11 +52,15 @@ bool CDSConfig::_is_using_optimized_module_handling = true;
+ bool CDSConfig::_is_dumping_full_module_graph = true;
+ bool CDSConfig::_is_using_full_module_graph = true;
+ bool CDSConfig::_has_aot_linked_classes = false;
++bool CDSConfig::_is_merged_cache = false;
+ bool CDSConfig::_is_single_command_training = false;
+ bool CDSConfig::_has_temp_aot_config_file = false;
+ bool CDSConfig::_old_cds_flags_used = false;
+ bool CDSConfig::_new_aot_flags_used = false;
+ bool CDSConfig::_disable_heap_dumping = false;
++bool CDSConfig::_is_merging_aot_cache = false;
++bool CDSConfig::_has_merge_inputs = false;
++GrowableArrayCHeap<const char*, mtClassShared>* CDSConfig::_merge_input_paths = nullptr;
+ 
+ const char* CDSConfig::_default_archive_path = nullptr;
+ const char* CDSConfig::_input_static_archive_path = nullptr;
+@@ -77,6 +83,12 @@ DEBUG_ONLY(static bool _cds_ergo_initialize_started = false);
+ void CDSConfig::ergo_initialize() {
+   DEBUG_ONLY(_cds_ergo_initialize_started = true);
+ 
++  if (is_merging_aot_cache()) {
++    assert(RequireSharedSpaces, "merging AOT cache requires archive passed via -XX:AOTCache");
++    assert(UseSharedSpaces, "we must use AOTCache since we want to merge it");
++    log_info(aot,merge)("Sanity check in ergo_initalized pass");
++  }
++
+   if (is_dumping_static_archive() && !is_dumping_final_static_archive()) {
+     // Note: -Xshare and -XX:AOTMode flags are mutually exclusive.
+     // - Classic workflow: -Xshare:on and -Xshare:dump cannot take effect at the same time.
+@@ -409,6 +421,12 @@ void CDSConfig::check_aot_flags() {
+   CHECK_NEW_FLAG(AOTConfiguration);
+   CHECK_NEW_FLAG(AOTMode);
+ 
++  if (!FLAG_IS_DEFAULT(AOTMergeInputs)) {
++    if (FLAG_IS_DEFAULT(AOTMode) || AOTMode == nullptr || strcmp(AOTMode, "merge") != 0) {
++      vm_exit_during_initialization("-XX:AOTMergeInputs requires -XX:AOTMode=merge");
++    }
++  }
++
+   CHECK_SINGLE_PATH(AOTCache);
+   CHECK_SINGLE_PATH(AOTCacheOutput);
+   CHECK_SINGLE_PATH(AOTConfiguration);
+@@ -430,7 +448,8 @@ void CDSConfig::check_aot_flags() {
+     return;
+   }
+ 
+-  if (has_cache && has_cache_output) {
++  bool allow_cache_and_output = has_mode && strcmp(AOTMode, "merge") == 0;
++  if (has_cache && has_cache_output && !allow_cache_and_output) {
+     vm_exit_during_initialization("Only one of AOTCache or AOTCacheOutput can be specified");
+   }
+ 
+@@ -452,6 +471,8 @@ void CDSConfig::check_aot_flags() {
+     check_aotmode_off();
+   } else if (strcmp(AOTMode, "record") == 0) {
+     check_aotmode_record();
++  } else if (strcmp(AOTMode, "merge") == 0) {
++    check_aotmode_merge();
+   } else {
+     assert(strcmp(AOTMode, "create") == 0, "checked by AOTModeConstraintFunc");
+     check_aotmode_create();
+@@ -462,6 +483,58 @@ void CDSConfig::check_aot_flags() {
+   FLAG_SET_ERGO(AllowArchivingWithJavaAgent, false);
+ }
+ 
++void CDSConfig::check_aotmode_merge() {
++  // enable merging mode
++  _is_merging_aot_cache = true;
++
++  FLAG_SET_ERGO_IF_DEFAULT(AOTCacheOutput, "combined.aot");
++
++  // Set up a temporary AOT configuration (preimage) file for the two-phase merge.
++  // Phase 1 (this VM) produces the preimage; Phase 2 (forked child) assembles
++  // the final archive with a clean heap.
++  if (FLAG_IS_DEFAULT(AOTConfiguration)) {
++    size_t len = strlen(AOTCacheOutput) + 10;
++    char* temp = AllocateHeap(len, mtArguments);
++    jio_snprintf(temp, len, "%s.config", AOTCacheOutput);
++    FLAG_SET_ERGO(AOTConfiguration, temp);
++    FreeHeap(temp);
++    _has_temp_aot_config_file = true;
++  }
++  _is_single_command_training = true;
++
++  UseSharedSpaces = true;
++  RequireSharedSpaces = true;
++
++  log_info(aot, merge)("AOT cache merge enabled with AOTCache=%s AOTCacheOutput=%s AOTConfiguration=%s",
++                       AOTCache != nullptr ? AOTCache : "(none)", AOTCacheOutput, AOTConfiguration);
++
++  // Parse AOTMergeInputs into the _merge_input_paths array
++  if (!FLAG_IS_DEFAULT(AOTMergeInputs) && AOTMergeInputs != nullptr) {
++    _merge_input_paths = new GrowableArrayCHeap<const char*, mtClassShared>(4);
++    const char* sep = os::path_separator();
++    const char* p = AOTMergeInputs;
++    while (*p != '\0') {
++      const char* end = strstr(p, sep);
++      if (end == nullptr) {
++        end = p + strlen(p);
++      }
++      size_t len = end - p;
++      if (len > 0) {
++        char* path = AllocateHeap(len + 1, mtArguments);
++        strncpy(path, p, len);
++        path[len] = '\0';
++        _merge_input_paths->append(path);
++        log_info(aot, merge)("  secondary merge input: %s", path);
++      }
++      p = end;
++      if (*p != '\0') p += strlen(sep);
++    }
++    if (_merge_input_paths->length() > 0) {
++      _has_merge_inputs = true;
++    }
++  }
++}
++
+ void CDSConfig::check_aotmode_off() {
+   UseSharedSpaces = false;
+   RequireSharedSpaces = false;
+@@ -608,6 +681,10 @@ void CDSConfig::ergo_init_aot_paths() {
+     } else {
+       _input_static_archive_path = AOTCache;
+     }
++    if (is_merging_aot_cache()) {
++      // In merge mode, the output is the combined cache (set by check_aotmode_merge)
++      _output_archive_path = AOTCacheOutput;
++    }
+   }
+ }
+ 
+@@ -724,7 +801,8 @@ void CDSConfig::prepare_for_dumping() {
+ bool CDSConfig::is_dumping_classic_static_archive() {
+   return _is_dumping_static_archive &&
+     !is_dumping_preimage_static_archive() &&
+-    !is_dumping_final_static_archive();
++    !is_dumping_final_static_archive() &&
++    !is_merging_aot_cache();
+ }
+ 
+ bool CDSConfig::is_dumping_preimage_static_archive() {
+@@ -853,6 +931,10 @@ void CDSConfig::log_reasons_for_not_dumping_heap() {
+ 
+   if (_disable_heap_dumping) {
+     reason = "Programmatically disabled";
++  } else if (is_merging_aot_cache() && _has_merge_inputs) {
++    // Heap archiving only happens in the final static archive assembly phase,
++    // not during preimage creation or AOT cache merging.
++    reason = "Java heap is not archived in preimage or merge phase";
+   } else {
+     reason = check_options_incompatible_with_dumping_heap();
+   }
+@@ -945,6 +1027,14 @@ void CDSConfig::set_has_aot_linked_classes(bool has_aot_linked_classes) {
+   _has_aot_linked_classes |= has_aot_linked_classes;
+ }
+ 
++bool CDSConfig::is_merged_cache() {
++  return _is_merged_cache;
++}
++
++void CDSConfig::set_is_merged_cache(bool v) {
++  _is_merged_cache = v;
++}
++
+ bool CDSConfig::is_initing_classes_at_dump_time() {
+   return is_dumping_heap() && is_dumping_aot_linked_classes();
+ }
+diff --git a/src/hotspot/share/cds/cdsConfig.hpp b/src/hotspot/share/cds/cdsConfig.hpp
+index 954d50acf63..ff229d891bd 100644
+--- a/src/hotspot/share/cds/cdsConfig.hpp
++++ b/src/hotspot/share/cds/cdsConfig.hpp
+@@ -27,6 +27,7 @@
+ 
+ #include "memory/allStatic.hpp"
+ #include "utilities/globalDefinitions.hpp"
++#include "utilities/growableArray.hpp"
+ #include "utilities/macros.hpp"
+ 
+ class JavaThread;
+@@ -41,8 +42,10 @@ class CDSConfig : public AllStatic {
+   static bool _is_dumping_full_module_graph;
+   static bool _is_using_full_module_graph;
+   static bool _has_aot_linked_classes;
++  static bool _is_merged_cache;
+   static bool _is_single_command_training;
+   static bool _has_temp_aot_config_file;
++  static bool _is_merging_aot_cache;
+ 
+   const static char* _default_archive_path;
+   const static char* _input_static_archive_path;
+@@ -52,6 +55,8 @@ class CDSConfig : public AllStatic {
+   static bool  _old_cds_flags_used;
+   static bool  _new_aot_flags_used;
+   static bool  _disable_heap_dumping;
++  static bool  _has_merge_inputs;
++  static GrowableArrayCHeap<const char*, mtClassShared>* _merge_input_paths;
+ 
+   static JavaThread* _dumper_thread;
+ #endif
+@@ -68,6 +73,7 @@ class CDSConfig : public AllStatic {
+   static void check_aotmode_off();
+   static void check_aotmode_auto_or_on();
+   static void check_aotmode_record();
++  static void check_aotmode_merge();
+   static void check_aotmode_create();
+   static void check_unsupported_dumping_module_options();
+ 
+@@ -110,6 +116,8 @@ class CDSConfig : public AllStatic {
+   // static_archive
+   static bool is_dumping_static_archive()                    { return CDS_ONLY(_is_dumping_static_archive) NOT_CDS(false); }
+   static void enable_dumping_static_archive()                { CDS_ONLY(_is_dumping_static_archive = true); }
++  static void enable_dumping_preimage_static_archive()       { CDS_ONLY(_is_dumping_preimage_static_archive = true); }
++  static void set_output_archive_path(const char* path)      { CDS_ONLY(_output_archive_path = path); }
+ 
+   // A static CDS archive can be dumped in three modes:
+   //
+@@ -159,6 +167,8 @@ class CDSConfig : public AllStatic {
+   static bool is_dumping_aot_linked_classes()                NOT_CDS_JAVA_HEAP_RETURN_(false);
+   static bool is_using_aot_linked_classes()                  NOT_CDS_JAVA_HEAP_RETURN_(false);
+   static void set_has_aot_linked_classes(bool has_aot_linked_classes) NOT_CDS_JAVA_HEAP_RETURN;
++  static bool is_merged_cache()                              NOT_CDS_RETURN_(false);
++  static void set_is_merged_cache(bool v)                    NOT_CDS_RETURN;
+ 
+   // archive_path
+ 
+@@ -194,6 +204,12 @@ class CDSConfig : public AllStatic {
+   static void enable_dumping_aot_code()                      NOT_CDS_RETURN;
+   static bool is_dumping_adapters()                          NOT_CDS_RETURN_(false);
+ 
++  // --- AOT cache merging at runtime
++  static bool is_merging_aot_cache()                         { return CDS_ONLY(_is_merging_aot_cache) NOT_CDS(false); }
++  static bool has_merge_inputs()                             { return CDS_ONLY(_has_merge_inputs) NOT_CDS(false); }
++  static int  num_merge_inputs()                             { return CDS_ONLY(_merge_input_paths != nullptr ? _merge_input_paths->length() : 0) NOT_CDS(0); }
++  static const char* merge_input_at(int i)                   { return CDS_ONLY(_merge_input_paths->at(i)) NOT_CDS(nullptr); }
++
+   // Some CDS functions assume that they are called only within a single-threaded context. I.e.,
+   // they are called from:
+   //    - The VM thread (e.g., inside VM_PopulateDumpSharedSpace)
+diff --git a/src/hotspot/share/cds/cds_globals.hpp b/src/hotspot/share/cds/cds_globals.hpp
+index 46a545e09e2..c05c35b8348 100644
+--- a/src/hotspot/share/cds/cds_globals.hpp
++++ b/src/hotspot/share/cds/cds_globals.hpp
+@@ -103,10 +103,10 @@
+   /*========== New "AOT" flags =========================================*/  \
+   /* The following 3 flags are aliases of -Xshare:dump,                 */  \
+   /* -XX:SharedArchiveFile=..., etc. See CDSConfig::check_flag_aliases()*/  \
+-                                                                            \
++  /* TODO: Should possible mark merge mode as experimental */               \
+   product(ccstr, AOTMode, nullptr,                                          \
+           "Specifies how AOTCache should be created or used. Valid values " \
+-          "are: off, record, create, auto, on; the default is auto")        \
++          "are: off, record, create, auto, on, merge; the default is auto") \
+           constraint(AOTModeConstraintFunc, AtParse)                        \
+                                                                             \
+   product(ccstr, AOTConfiguration, nullptr,                                 \
+@@ -122,6 +122,14 @@
+   product(ccstr, AOTCacheOutput, nullptr,                                   \
+           "Specifies the file name for writing the AOT cache")              \
+                                                                             \
++  product(ccstr, AOTMergeInputs, nullptr,                                   \
++          "Additional AOT cache files to merge (separated by path "         \
++          "separator)")                                                     \
++                                                                            \
++  product(ccstr, AOTDumpArchivedClassList, nullptr,                         \
++          "Dump names of all archived classes to the specified file and "   \
++          "exit immediately")                                               \
++                                                                            \
+   product(bool, AOTInvokeDynamicLinking, false, DIAGNOSTIC,                 \
+           "AOT-link JVM_CONSTANT_InvokeDynamic entries in cached "          \
+           "ConstantPools")                                                  \
+diff --git a/src/hotspot/share/cds/cppVtables.cpp b/src/hotspot/share/cds/cppVtables.cpp
+index 46dbfd45d46..2cf9b3ee25c 100644
+--- a/src/hotspot/share/cds/cppVtables.cpp
++++ b/src/hotspot/share/cds/cppVtables.cpp
+@@ -231,10 +231,9 @@ char* CppVtables::_vtables_serialized_base = nullptr;
+ void CppVtables::dumptime_init(ArchiveBuilder* builder) {
+   assert(CDSConfig::is_dumping_static_archive(), "cpp tables are only dumped into static archive");
+ 
+-  if (CDSConfig::is_dumping_final_static_archive()) {
+-    // When dumping final archive, _index[kind] at this point is in the preimage.
+-    // Remember these vtable pointers in _archived_cpp_vtptrs, as _index[kind] will now be rewritten
+-    // to point to the runtime vtable data.
++  if (CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache()) {
++    // Without this, we get an error that "kind" of some classes is greater than _num_cloned_vtable_kinds
++    // See get_archived_table below
+     for (int i = 0; i < _num_cloned_vtable_kinds; i++) {
+       assert(_index[i] != nullptr, "must have been restored by CppVtables::serialize()");
+       _archived_cpp_vtptrs[i] = _index[i]->cloned_vtable();
+diff --git a/src/hotspot/share/cds/dumpTimeClassInfo.cpp b/src/hotspot/share/cds/dumpTimeClassInfo.cpp
+index 6a06344fb0d..3e2589853e5 100644
+--- a/src/hotspot/share/cds/dumpTimeClassInfo.cpp
++++ b/src/hotspot/share/cds/dumpTimeClassInfo.cpp
+@@ -142,16 +142,24 @@ bool DumpTimeClassInfo::is_builtin() {
+ }
+ 
+ DumpTimeClassInfo* DumpTimeSharedClassTable::allocate_info(InstanceKlass* k) {
+-  assert(CDSConfig::is_dumping_final_static_archive() || !k->is_shared(), "Do not call with shared classes");
++  assert(CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache() || !k->is_shared(),
++         "Do not call with shared classes");
+   bool created;
+   DumpTimeClassInfo* p = put_if_absent(k, &created);
+-  assert(created, "must not exist in table");
++  if (!created) {
++    // During merge, classes may already be registered via the Klass constructor
++    // (e.g. ProcessPipeOutputStream loaded when forking helper VMs).
++    assert(CDSConfig::is_merging_aot_cache(), "must not exist in table");
++    assert(p->_klass == k, "Sanity");
++    return p;
++  }
+   p->_klass = k;
+   return p;
+ }
+ 
+ DumpTimeClassInfo* DumpTimeSharedClassTable::get_info(InstanceKlass* k) {
+-  assert(CDSConfig::is_dumping_final_static_archive() || !k->is_shared(), "Do not call with shared classes");
++  assert(CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache() || !k->is_shared(),
++         "Do not call with shared classes");
+   DumpTimeClassInfo* p = get(k);
+   assert(p != nullptr, "we must not see any non-shared InstanceKlass* that's "
+          "not stored with SystemDictionaryShared::init_dumptime_info");
+diff --git a/src/hotspot/share/cds/dumpTimeClassInfo.inline.hpp b/src/hotspot/share/cds/dumpTimeClassInfo.inline.hpp
+index 2d1f57175a0..70daff31319 100644
+--- a/src/hotspot/share/cds/dumpTimeClassInfo.inline.hpp
++++ b/src/hotspot/share/cds/dumpTimeClassInfo.inline.hpp
+@@ -48,6 +48,14 @@ void DumpTimeSharedClassTable::iterate_all_live_classes(Function function) const
+     if (CDSConfig::is_dumping_final_static_archive() && !k->is_loaded()) {
+       assert(k->defined_by_other_loaders(), "must be");
+       function(k, info);
++    } else if (CDSConfig::is_merging_aot_cache()) {
++      // For merge mode, include shared classes from the input cache even if their
++      // CLD is null (they were archived but not loaded during this merge run).
++      if (k->is_shared() && k->class_loader_data() == nullptr) {
++        function(k, info);
++      } else if (k->class_loader_data() != nullptr && k->is_loader_alive()) {
++        function(k, info);
++      }
+     } else if (k->is_loader_alive()) {
+       function(k, info);
+       assert(k->is_loader_alive(), "must not change");
+diff --git a/src/hotspot/share/cds/filemap.cpp b/src/hotspot/share/cds/filemap.cpp
+index 3ed9a2895c4..ee52da6728b 100644
+--- a/src/hotspot/share/cds/filemap.cpp
++++ b/src/hotspot/share/cds/filemap.cpp
+@@ -153,7 +153,8 @@ FileMapInfo::~FileMapInfo() {
+ }
+ 
+ void FileMapInfo::free_current_info() {
+-  assert(CDSConfig::is_dumping_final_static_archive(), "only supported in this mode");
++  assert(CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache(),
++         "only supported in final static archive or merge modes");
+   assert(_current_info != nullptr, "sanity");
+   delete _current_info;
+   assert(_current_info == nullptr, "sanity"); // Side effect expected from the above "delete" operator.
+@@ -234,6 +235,7 @@ void FileMapHeader::populate(FileMapInfo *info, size_t core_region_alignment,
+   _max_heap_size = MaxHeapSize;
+   _use_optimized_module_handling = CDSConfig::is_using_optimized_module_handling();
+   _has_aot_linked_classes = CDSConfig::is_dumping_aot_linked_classes();
++  _is_merged_cache = CDSConfig::is_merged_cache();
+   _has_full_module_graph = CDSConfig::is_dumping_full_module_graph();
+ 
+   // The following fields are for sanity checks for whether this archive
+@@ -309,6 +311,7 @@ void FileMapHeader::print(outputStream* st) {
+   st->print_cr("- use_optimized_module_handling:  %d", _use_optimized_module_handling);
+   st->print_cr("- has_full_module_graph           %d", _has_full_module_graph);
+   st->print_cr("- has_aot_linked_classes          %d", _has_aot_linked_classes);
++  st->print_cr("- is_merged_cache                 %d", _is_merged_cache);
+ }
+ 
+ bool FileMapInfo::validate_class_location() {
+@@ -1844,6 +1847,9 @@ bool FileMapInfo::open_as_input() {
+ bool FileMapInfo::validate_aot_class_linking() {
+   // These checks need to be done after FileMapInfo::initialize(), which gets called before Universe::heap()
+   // is available.
++  if (header()->is_merged_cache()) {
++    CDSConfig::set_is_merged_cache(true);
++  }
+   if (header()->has_aot_linked_classes()) {
+     const char* archive_type = CDSConfig::type_of_archive_being_loaded();
+     CDSConfig::set_has_aot_linked_classes(true);
+diff --git a/src/hotspot/share/cds/filemap.hpp b/src/hotspot/share/cds/filemap.hpp
+index d90be1ccff3..f3f91eaea1a 100644
+--- a/src/hotspot/share/cds/filemap.hpp
++++ b/src/hotspot/share/cds/filemap.hpp
+@@ -139,6 +139,7 @@ class FileMapHeader: private CDSFileMapHeaderBase {
+   bool   _use_optimized_module_handling;// No module-relation VM options were specified, so we can skip
+                                         // some expensive operations.
+   bool   _has_aot_linked_classes;       // Was the CDS archive created with -XX:+AOTClassLinking
++  bool   _is_merged_cache;             // Was this archive produced by merging multiple AOT caches?
+   bool   _has_full_module_graph;        // Does this CDS archive contain the full archived module graph?
+   HeapRootSegments _heap_root_segments; // Heap root segments info
+   size_t _heap_oopmap_start_pos;        // The first bit in the oopmap corresponds to this position in the heap.
+@@ -186,6 +187,8 @@ class FileMapHeader: private CDSFileMapHeaderBase {
+   char* mapped_base_address()              const { return _mapped_base_address; }
+   bool has_platform_or_app_classes()       const { return _has_platform_or_app_classes; }
+   bool has_aot_linked_classes()            const { return _has_aot_linked_classes; }
++  bool is_merged_cache()                   const { return _is_merged_cache; }
++  void set_is_merged_cache(bool v)               { _is_merged_cache = v; }
+   bool compressed_oops()                   const { return _compressed_oops; }
+   bool compressed_class_pointers()         const { return _compressed_class_ptrs; }
+   int narrow_klass_pointer_bits()          const { return _narrow_klass_pointer_bits; }
+diff --git a/src/hotspot/share/cds/finalImageRecipes.cpp b/src/hotspot/share/cds/finalImageRecipes.cpp
+index 8fc01220a6f..5d4365b6c07 100644
+--- a/src/hotspot/share/cds/finalImageRecipes.cpp
++++ b/src/hotspot/share/cds/finalImageRecipes.cpp
+@@ -144,7 +144,13 @@ void FinalImageRecipes::apply_recipes_for_constantpool(JavaThread* current) {
+     Array<int>* cp_indices = _cp_recipes->at(i);
+     int flags = _cp_flags->at(i);
+     if (cp_indices != nullptr) {
+-      InstanceKlass* ik = InstanceKlass::cast(_all_klasses->at(i));
++      // Use live class pointer if available (merge flow); skip classes that failed to load/link.
++      if (_live_klasses != nullptr && _live_klasses->at(i) == nullptr) {
++        continue;
++      }
++      InstanceKlass* ik = (_live_klasses != nullptr)
++                          ? _live_klasses->at(i)
++                          : InstanceKlass::cast(_all_klasses->at(i));
+       if (ik->is_loaded()) {
+         ResourceMark rm(current);
+         ConstantPool* cp = ik->constants();
+@@ -169,7 +175,11 @@ void FinalImageRecipes::apply_recipes_for_constantpool(JavaThread* current) {
+ void FinalImageRecipes::load_all_classes(TRAPS) {
+   assert(CDSConfig::is_dumping_final_static_archive(), "sanity");
+   Handle class_loader(THREAD, SystemDictionary::java_system_loader());
+-  for (int i = 0; i < _all_klasses->length(); i++) {
++
++  int len = _all_klasses->length();
++  _live_klasses = new (mtClassShared) GrowableArray<InstanceKlass*>(len, len, nullptr, mtClassShared);
++
++  for (int i = 0; i < len; i++) {
+     Klass* k = _all_klasses->at(i);
+     if (k->is_instance_klass()) {
+       InstanceKlass* ik = InstanceKlass::cast(k);
+@@ -177,17 +187,41 @@ void FinalImageRecipes::load_all_classes(TRAPS) {
+         SystemDictionaryShared::init_dumptime_info(ik);
+         SystemDictionaryShared::add_unregistered_class(THREAD, ik);
+         SystemDictionaryShared::copy_unregistered_class_size_and_crc32(ik);
++        _live_klasses->at_put(i, ik);
+       } else if (!ik->is_hidden()) {
+-        Klass* actual = SystemDictionary::resolve_or_fail(ik->name(), class_loader, true, CHECK);
+-        if (actual != ik) {
++        // In a merge flow, some classes from input AOT caches may not exist on the
++        // current classpath. Use THREAD to catch exceptions and skip missing classes
++        // gracefully instead of aborting the assembly.
++        Klass* actual = SystemDictionary::resolve_or_null(ik->name(), class_loader, THREAD);
++        if (HAS_PENDING_EXCEPTION) {
++          ResourceMark rm(THREAD);
++          log_info(aot, load)("Skipping %s (resolution failed)", ik->external_name());
++          CLEAR_PENDING_EXCEPTION;
++          continue;
++        }
++        if (actual == nullptr) {
++          ResourceMark rm(THREAD);
++          log_info(aot, load)("Skipping %s (not found on current classpath)", ik->external_name());
++          continue;
++        }
++        // In a normal record→create flow, actual == ik because Phase 2 maps the preimage and
++        // resolves the class directly from the archive at the same address.
++        //
++        // In a merge→create flow, some classes in _all_klasses came from an input AOT cache
++        // that is NOT mapped in Phase 2. resolve_or_fail loads them fresh from the classpath,
++        // so actual != ik. In that case link `actual` (the live class), not `ik` (the archived
++        // preimage copy which has had remove_unshareable_info() called on it, clearing
++        // _init_lock and other fields).
++        InstanceKlass* to_link = (actual != ik) ? InstanceKlass::cast(actual) : ik;
++        assert(to_link->is_loaded(), "must be");
++        to_link->link_class(THREAD);
++        if (HAS_PENDING_EXCEPTION) {
+           ResourceMark rm(THREAD);
+-          log_error(aot)("Unable to resolve class from CDS archive: %s", ik->external_name());
+-          log_error(aot)("Expected: " INTPTR_FORMAT ", actual: " INTPTR_FORMAT, p2i(ik), p2i(actual));
+-          log_error(aot)("Please check if your VM command-line is the same as in the training run");
+-          MetaspaceShared::unrecoverable_writing_error();
++          log_info(aot, load)("Skipping %s (linking failed, dependency not on classpath)", to_link->external_name());
++          CLEAR_PENDING_EXCEPTION;
++          continue;
+         }
+-        assert(ik->is_loaded(), "must be");
+-        ik->link_class(CHECK);
++        _live_klasses->at_put(i, to_link);
+       }
+     }
+   }
+diff --git a/src/hotspot/share/cds/finalImageRecipes.hpp b/src/hotspot/share/cds/finalImageRecipes.hpp
+index 3af1e70772c..18395257d62 100644
+--- a/src/hotspot/share/cds/finalImageRecipes.hpp
++++ b/src/hotspot/share/cds/finalImageRecipes.hpp
+@@ -50,12 +50,14 @@ class FinalImageRecipes {
+   // into the final image.
+   Array<Klass*>* _all_klasses;
+ 
++  GrowableArray<InstanceKlass*>* _live_klasses;
++
+   // For each klass k _all_klasses->at(i), _cp_recipes->at(i) lists all the {klass,field,method,indy}
+   // cp indices that were resolved for k during the training run.
+   Array<Array<int>*>* _cp_recipes;
+   Array<int>* _cp_flags;
+ 
+-  FinalImageRecipes() : _all_klasses(nullptr), _cp_recipes(nullptr), _cp_flags(nullptr) {}
++  FinalImageRecipes() : _all_klasses(nullptr), _live_klasses(nullptr), _cp_recipes(nullptr), _cp_flags(nullptr) {}
+ 
+   void* operator new(size_t size) throw();
+ 
+diff --git a/src/hotspot/share/cds/heapShared.cpp b/src/hotspot/share/cds/heapShared.cpp
+index 06cbaf1dbe7..21f263b76d5 100644
+--- a/src/hotspot/share/cds/heapShared.cpp
++++ b/src/hotspot/share/cds/heapShared.cpp
+@@ -261,7 +261,6 @@ void HeapShared::get_segment_indexes(int idx, int& seg_idx, int& int_idx) {
+ // Returns an objArray that contains all the roots of the archived objects
+ oop HeapShared::get_root(int index, bool clear) {
+   assert(index >= 0, "sanity");
+-  assert(!CDSConfig::is_dumping_heap() && CDSConfig::is_using_archive(), "runtime only");
+   assert(!_root_segments->is_empty(), "must have loaded shared heap");
+   int seg_idx, int_idx;
+   get_segment_indexes(index, seg_idx, int_idx);
+@@ -698,7 +697,9 @@ void HeapShared::scan_java_mirror(oop orig_mirror) {
+ }
+ 
+ void HeapShared::scan_java_class(Klass* orig_k) {
+-  scan_java_mirror(orig_k->java_mirror());
++  oop mirror = orig_k->java_mirror();
++  if (mirror == nullptr) return;
++  scan_java_mirror(mirror);
+ 
+   if (orig_k->is_instance_klass()) {
+     InstanceKlass* orig_ik = InstanceKlass::cast(orig_k);
+@@ -1039,6 +1040,9 @@ void HeapShared::init_root_segment_sizes(int max_size_elems) {
+ void HeapShared::serialize_tables(SerializeClosure* soc) {
+ 
+ #ifndef PRODUCT
++  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
++    _archived_ArchiveHeapTestClass = nullptr;
++  }
+   soc->do_ptr(&_archived_ArchiveHeapTestClass);
+   if (soc->reading() && _archived_ArchiveHeapTestClass != nullptr) {
+     _test_class_name = _archived_ArchiveHeapTestClass->adr_at(0);
+@@ -1046,6 +1050,12 @@ void HeapShared::serialize_tables(SerializeClosure* soc) {
+   }
+ #endif
+ 
++  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
++    // In merge mode, heap is not dumped, so these tables still have stale pointers
++    // from the old archive. Reset to avoid serializing invalid addresses.
++    _run_time_subgraph_info_table.reset();
++    _run_time_special_subgraph = nullptr;
++  }
+   _run_time_subgraph_info_table.serialize_header(soc);
+   soc->do_ptr(&_run_time_special_subgraph);
+ }
+diff --git a/src/hotspot/share/cds/lambdaFormInvokers.cpp b/src/hotspot/share/cds/lambdaFormInvokers.cpp
+index d6a51c87513..5e4e942d027 100644
+--- a/src/hotspot/share/cds/lambdaFormInvokers.cpp
++++ b/src/hotspot/share/cds/lambdaFormInvokers.cpp
+@@ -273,6 +273,10 @@ void LambdaFormInvokers::read_static_archive_invokers() {
+ }
+ 
+ void LambdaFormInvokers::serialize(SerializeClosure* soc) {
++  // Probably this should not be done as this boosts performance
++  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
++    _static_archive_invokers = nullptr;
++  }
+   soc->do_ptr(&_static_archive_invokers);
+   if (soc->reading() && CDSConfig::is_dumping_final_static_archive()) {
+     if (!CDSConfig::is_dumping_aot_linked_classes()) {
+diff --git a/src/hotspot/share/cds/metaspaceShared.cpp b/src/hotspot/share/cds/metaspaceShared.cpp
+index a1db7a8c7ac..b64836d7f07 100644
+--- a/src/hotspot/share/cds/metaspaceShared.cpp
++++ b/src/hotspot/share/cds/metaspaceShared.cpp
+@@ -143,6 +143,10 @@ char* MetaspaceShared::symbol_space_alloc(size_t num_bytes) {
+   return _symbol_region.allocate(num_bytes);
+ }
+ 
++bool MetaspaceShared::symbol_space_is_allocatable() {
++  return _symbol_region.is_allocatable();
++}
++
+ // os::vm_allocation_granularity() is usually 4K for most OSes. However, some platforms
+ // such as linux-aarch64 and macos-x64 ...
+ // it can be either 4K or 64K and on macos-aarch64 it is 16K. To generate archives that are
+@@ -323,8 +327,44 @@ void MetaspaceShared::initialize_for_static_dump() {
+   _symbol_region.init(&_symbol_rs, &_symbol_vs);
+ }
+ 
++// Called in the helper VM (when -XX:AOTDumpArchivedClassList=<file> is set).
++// Writes the internal names of all archived classes to the specified file, one per line,
++// then exits immediately. Called from MetaspaceShared::post_initialize().
++static void dump_archived_classlist(const char* output_path) {
++  fileStream fs(output_path);
++  if (!fs.is_open()) {
++    log_error(aot, merge)("Cannot open %s for writing class list", output_path);
++    vm_direct_exit(1);
++  }
++
++  // this is important before array allocation
++  ResourceMark rm;
++  GrowableArray<Klass*> classes;
++  SystemDictionaryShared::get_all_archived_classes(true, &classes);
++  log_info(aot, merge)("Writing %d archived class names to %s", classes.length(), output_path);
++  for (int i = 0; i < classes.length(); i++) {
++    Klass* k = classes.at(i);
++    if (k->is_instance_klass()) {
++      ResourceMark rm;
++      fs.print_cr("%s", k->name()->as_C_string());
++    }
++  }
++  vm_direct_exit(0);
++}
++
+ // Called by universe_post_init()
+ void MetaspaceShared::post_initialize(TRAPS) {
++  // If the helper VM was started with -XX:AOTDumpArchivedClassList, write class names and exit.
++  if (!FLAG_IS_DEFAULT(AOTDumpArchivedClassList) && AOTDumpArchivedClassList != nullptr) {
++    if (CDSConfig::is_using_archive()) {
++      dump_archived_classlist(AOTDumpArchivedClassList);
++      // dump_archived_classlist calls vm_direct_exit(); does not return
++    } else {
++      log_error(aot, merge)("AOTDumpArchivedClassList requires an AOT cache to be loaded (-XX:AOTCache=<file>)");
++      vm_direct_exit(1);
++    }
++  }
++
+   if (CDSConfig::is_using_archive()) {
+     FileMapInfo *static_mapinfo = FileMapInfo::current_info();
+     FileMapInfo *dynamic_mapinfo = FileMapInfo::dynamic_info();
+@@ -465,6 +505,17 @@ void MetaspaceShared::early_serialize(SerializeClosure* soc) {
+   int tag = 0;
+   soc->do_tag(--tag);
+   CDS_JAVA_HEAP_ONLY(Modules::serialize_archived_module_info(soc);)
++
++  // Propagate the merged-cache flag from Phase 1 (AOTMode=merge) to Phase 2
++  // (the forked child that assembles the final static archive). When writing
++  // the preimage, capture is_merging_aot_cache(); when reading it back in the
++  // child, restore the flag so populate_header() can embed it in the output.
++  bool is_merged = CDSConfig::is_merging_aot_cache();
++  soc->do_bool(&is_merged);
++  if (!soc->writing() && is_merged) {
++    CDSConfig::set_is_merged_cache(true);
++  }
++
+   soc->do_tag(666);
+ }
+ 
+@@ -510,6 +561,9 @@ void MetaspaceShared::serialize(SerializeClosure* soc) {
+   soc->do_tag(--tag);
+ 
+   CDS_JAVA_HEAP_ONLY(ClassLoaderDataShared::serialize(soc);)
++  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
++    _archived_method_handle_intrinsics = nullptr;
++  }
+   soc->do_ptr((void**)&_archived_method_handle_intrinsics);
+ 
+   LambdaFormInvokers::serialize(soc);
+@@ -647,9 +701,10 @@ char* VM_PopulateDumpSharedSpace::dump_read_only_tables(AOTClassLocationConfig*&
+ }
+ 
+ void VM_PopulateDumpSharedSpace::doit() {
+-  if (!CDSConfig::is_dumping_final_static_archive()) {
+-    guarantee(!CDSConfig::is_using_archive(), "We should not be using an archive when we dump");
+-  }
++  // We can dump archive when using a shared archive
++  // if (!CDSConfig::is_dumping_final_static_archive()) {
++  //   guarantee(!CDSConfig::is_using_archive(), "We should not be using an archive when we dump");
++  // }
+ 
+   DEBUG_ONLY(SystemDictionaryShared::NoClassLoadingMark nclm);
+ 
+@@ -698,8 +753,9 @@ void VM_PopulateDumpSharedSpace::doit() {
+   CppVtables::zero_archived_vtables();
+ 
+   // Write the archive file
+-  if (CDSConfig::is_dumping_final_static_archive()) {
+-    FileMapInfo::free_current_info(); // FIXME: should not free current info
++  if (CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache()) {
++    // Free the input archive's FileMapInfo so we can create a new one for the output.
++    FileMapInfo::free_current_info();
+   }
+   const char* static_archive = CDSConfig::output_archive_path();
+   assert(static_archive != nullptr, "sanity");
+@@ -1076,16 +1132,39 @@ static int exec_jvm_with_java_tool_options(const char* java_launcher_path, TRAPS
+   HandleMark hm(THREAD);
+   GrowableArray<Handle> args;
+ 
+-  const char* cp = Arguments::get_appclasspath();
+-  if (cp != nullptr && strlen(cp) > 0 && strcmp(cp, ".") != 0) {
+-    // We cannot use "-cp", because "-cp" is only interpreted by the java launcher,
+-    // and is not interpreter by arguments.cpp when it loads args from JAVA_TOOL_OPTIONS
+-    stringStream ss;
+-    ss.print("-Djava.class.path=");
+-    ss.print_raw(cp);
+-    append_args(&args, ss.freeze(), CHECK_0);
+-    // CDS$ProcessLauncher::execWithJavaToolOptions() must unset CLASSPATH, which has
+-    // a higher priority than -Djava.class.path=
++  // Build the classpath for the child process. We use the already-expanded dumptime
++  // classpath (AOTClassLocationConfig::dumptime()) rather than the raw appclasspath
++  // from Arguments::get_appclasspath(). The dumptime config was built with
++  // parse_manifest=true, so it has already expanded any Class-Path manifest entries
++  // (e.g. surefirebooter.jar -> fontbox.jar, pdfbox-io.jar, ...). Passing the
++  // unexpanded surefirebooter.jar via -Djava.class.path would not expand the manifest,
++  // so Phase 2 would fail to load classes from the transitive JARs.
++  //
++  // We cannot use "-cp" because it is only interpreted by the java launcher and not
++  // by arguments.cpp when loading args from JAVA_TOOL_OPTIONS.
++  if (AOTClassLocationConfig::dumptime_is_ready()) {
++    const AOTClassLocationConfig* cl_config = AOTClassLocationConfig::dumptime();
++    int app_start = cl_config->app_cp_start_index();
++    int app_end   = cl_config->app_cp_end_index();
++    if (app_end > app_start) {
++      stringStream ss;
++      ss.print("-Djava.class.path=");
++      for (int i = app_start; i < app_end; i++) {
++        if (i > app_start) ss.print_raw(os::path_separator());
++        ss.print_raw(cl_config->class_location_at(i)->path());
++      }
++      append_args(&args, ss.freeze(), CHECK_0);
++      // CDS$ProcessLauncher::execWithJavaToolOptions() must unset CLASSPATH, which has
++      // higher priority than -Djava.class.path=
++    }
++  } else {
++    const char* cp = Arguments::get_appclasspath();
++    if (cp != nullptr && strlen(cp) > 0 && strcmp(cp, ".") != 0) {
++      stringStream ss;
++      ss.print("-Djava.class.path=");
++      ss.print_raw(cp);
++      append_args(&args, ss.freeze(), CHECK_0);
++    }
+   }
+ 
+   // Pass all arguments. These include those from JAVA_TOOL_OPTIONS and _JAVA_OPTIONS.
+@@ -1093,18 +1172,20 @@ static int exec_jvm_with_java_tool_options(const char* java_launcher_path, TRAPS
+     const char* arg = Arguments::jvm_args_array()[i];
+     if (strstr(arg, "-XX:AOTCacheOutput=") == arg || // arg starts with ...
+         strstr(arg, "-XX:AOTConfiguration=") == arg ||
+-        strstr(arg, "-XX:AOTMode=") == arg) {
++        strstr(arg, "-XX:AOTMode=") == arg ||
++        strstr(arg, "-XX:AOTCache=") == arg ||
++        strstr(arg, "-XX:AOTMergeInputs=") == arg) {
+       // Filter these out. They wiill be set below.
+     } else {
+       append_args(&args, arg, CHECK_0);
+     }
+   }
+ 
+-  // Note: because we are running in AOTMode=record, JDK_AOT_VM_OPTIONS have not been
+-  // parsed, so they are not in Arguments::jvm_args_array. If JDK_AOT_VM_OPTIONS is in
+-  // the environment, it will be inherited and parsed by the child JVM process
++  // Note: because we are running in AOTMode=record (or merge), JDK_AOT_VM_OPTIONS have
++  // not been parsed, so they are not in Arguments::jvm_args_array. If JDK_AOT_VM_OPTIONS
++  // is in the environment, it will be inherited and parsed by the child JVM process
+   // in Arguments::parse_java_tool_options_environment_variable().
+-  precond(strcmp(AOTMode, "record") == 0);
++  precond(strcmp(AOTMode, "record") == 0 || strcmp(AOTMode, "merge") == 0);
+ 
+   // We don't pass Arguments::jvm_flags_array(), as those will be added by
+   // the child process when it loads .hotspotrc
+@@ -1193,12 +1274,21 @@ bool MetaspaceShared::try_link_class(JavaThread* current, InstanceKlass* ik) {
+   assert(CDSConfig::is_dumping_archive(), "sanity");
+ 
+   if (ik->is_shared() && !CDSConfig::is_dumping_final_static_archive()) {
+-    assert(CDSConfig::is_dumping_dynamic_archive(), "must be");
++    assert(CDSConfig::is_dumping_dynamic_archive() || CDSConfig::is_merging_aot_cache(), "must be");
+     return false;
+   }
+ 
+   if (ik->is_loaded() && !ik->is_linked() && ik->can_be_verified_at_dumptime() &&
+       !SystemDictionaryShared::has_class_failed_verification(ik)) {
++    // Ensure a DumpTimeClassInfo entry exists for this non-shared class.
++    // A class may be loaded before dump mode is enabled (e.g., AOT bulk-loaded
++    // as a transitive dependency during JVM startup, before start_merging_aot_cache
++    // calls enable_dumping_static_archive). In that case Klass::set_name would not
++    // have called init_dumptime_info. Without this entry, add_verification_constraint
++    // crashes with a null DumpTimeClassInfo during bytecode verification below.
++    if (!ik->is_shared() && SystemDictionaryShared::dumptime_table()->get(ik) == nullptr) {
++      SystemDictionaryShared::init_dumptime_info(ik);
++    }
+     bool saved = BytecodeVerificationLocal;
+     if (ik->defined_by_other_loaders() && ik->class_loader() == nullptr) {
+       // The verification decision is based on BytecodeVerificationRemote
+@@ -2062,3 +2152,436 @@ void MetaspaceShared::print_on(outputStream* st) {
+   }
+   st->cr();
+ }
++
++
++class CollectLoadedClassesForMerge : public KlassClosure {
++  GrowableArray<InstanceKlass*>* _all_classes;
++  GrowableArray<InstanceKlass*>* _new_classes;
++
++public:
++  CollectLoadedClassesForMerge(GrowableArray<InstanceKlass*>* all_classes,
++                               GrowableArray<InstanceKlass*>* new_classes)
++    : _all_classes(all_classes), _new_classes(new_classes) {}
++
++  void do_klass(Klass* k) {
++    if (!k->is_instance_klass()) {
++      return;
++    }
++    InstanceKlass* ik = InstanceKlass::cast(k);
++    _all_classes->append(ik);
++
++    // Classes loaded from classfiles during this merge VM run (not from the primary archive)
++    // are the "new" classes to include in the merged cache. is_shared() is true only for
++    // classes that were loaded from an archive.
++    if (!ik->is_shared()) {
++      _new_classes->append(ik);
++    }
++  }
++};
++
++void MetaspaceShared::collect_loaded_classes_for_merge(GrowableArray<InstanceKlass*>* to_be_merged_classes) {
++  GrowableArray<InstanceKlass*> all_classes;
++  GrowableArray<InstanceKlass*> new_classes;
++
++  {
++    MutexLocker lock(ClassLoaderDataGraph_lock);
++    CollectLoadedClassesForMerge closure(&all_classes, &new_classes);
++    // probably helps with class unloading
++    ClassLoaderDataGraph::loaded_classes_do_keepalive(&closure);
++  }
++
++  log_info(aot, merge)("Total loaded classes: %d, already in cache: %d, new classes to merge: %d",
++                       all_classes.length(),
++                       all_classes.length() - new_classes.length(),
++                       new_classes.length());
++  // Verify that new_classes is a subset of all_classes
++  // new_classes is filtered from all_classes, so this should always hold
++  assert(new_classes.length() <= all_classes.length(), "sanity");
++
++  // we only choose the new classes to update the cache
++  // if we do all_classes then we will rewrite the cache with all the classes, which is not what we want
++  to_be_merged_classes->appendAll(&new_classes);
++}
++
++
++// Fork a helper VM to extract class names from a secondary AOT cache into a temp classlist file.
++// The helper runs: java -XX:AOTMode=on -XX:AOTCache=<cache_path>
++//                       -XX:AOTDumpArchivedClassList=<classlist_path>
++static int fork_extract_helper(const char* cache_path, const char* classlist_path, TRAPS) {
++  ResourceMark rm(THREAD);
++  HandleMark hm(THREAD);
++  GrowableArray<Handle> args;
++
++  // Pass the app classpath so the secondary cache can validate its classpath entries
++  if (AOTClassLocationConfig::dumptime_is_ready()) {
++    const AOTClassLocationConfig* cl_config = AOTClassLocationConfig::dumptime();
++    int app_start = cl_config->app_cp_start_index();
++    int app_end   = cl_config->app_cp_end_index();
++    if (app_end > app_start) {
++      stringStream ss;
++      ss.print("-Djava.class.path=");
++      for (int i = app_start; i < app_end; i++) {
++        if (i > app_start) ss.print_raw(os::path_separator());
++        ss.print_raw(cl_config->class_location_at(i)->path());
++      }
++      append_args(&args, ss.freeze(), CHECK_0);
++    }
++  } else {
++    const char* cp = Arguments::get_appclasspath();
++    if (cp != nullptr && strlen(cp) > 0 && strcmp(cp, ".") != 0) {
++      stringStream ss;
++      ss.print("-Djava.class.path=");
++      ss.print_raw(cp);
++      append_args(&args, ss.freeze(), CHECK_0);
++    }
++  }
++
++  // Pass all parent JVM args, filtering out AOT-specific flags
++  for (int i = 0; i < Arguments::num_jvm_args(); i++) {
++    const char* arg = Arguments::jvm_args_array()[i];
++    if (strstr(arg, "-XX:AOTCacheOutput=") == arg ||
++        strstr(arg, "-XX:AOTConfiguration=") == arg ||
++        strstr(arg, "-XX:AOTMode=") == arg ||
++        strstr(arg, "-XX:AOTCache=") == arg ||
++        strstr(arg, "-XX:AOTMergeInputs=") == arg ||
++        strstr(arg, "-XX:AOTDumpArchivedClassList=") == arg) {
++      // Filter these out; we set them below
++    } else {
++      append_args(&args, arg, CHECK_0);
++    }
++  }
++
++  {
++    stringStream ss;
++    ss.print("-XX:AOTCache=");
++    ss.print_raw(cache_path);
++    append_args(&args, ss.freeze(), CHECK_0);
++  }
++  {
++    stringStream ss;
++    ss.print("-XX:AOTDumpArchivedClassList=");
++    ss.print_raw(classlist_path);
++    append_args(&args, ss.freeze(), CHECK_0);
++  }
++  append_args(&args, "-XX:AOTMode=on", CHECK_0);
++
++  stringStream launcher_ss;
++  print_java_launcher(&launcher_ss);
++  const char* java_launcher_path = launcher_ss.freeze();
++
++  Symbol* klass_name = SymbolTable::new_symbol("jdk/internal/misc/CDS$ProcessLauncher");
++  Klass* k = SystemDictionary::resolve_or_fail(klass_name, true, CHECK_0);
++  Symbol* methodName = SymbolTable::new_symbol("execWithJavaToolOptions");
++  Symbol* methodSignature = SymbolTable::new_symbol("(Ljava/lang/String;[Ljava/lang/String;)I");
++
++  Handle launcher = java_lang_String::create_from_str(java_launcher_path, CHECK_0);
++  objArrayOop array = oopFactory::new_objArray(vmClasses::String_klass(), args.length(), CHECK_0);
++  for (int i = 0; i < args.length(); i++) {
++    array->obj_at_put(i, args.at(i)());
++  }
++  objArrayHandle launcher_args(THREAD, array);
++
++  JavaValue result(T_OBJECT);
++  JavaCallArguments javacall_args(2);
++  javacall_args.push_oop(launcher);
++  javacall_args.push_oop(launcher_args);
++  JavaCalls::call_static(&result,
++                          InstanceKlass::cast(k),
++                          methodName,
++                          methodSignature,
++                          &javacall_args,
++                          CHECK_0);
++  return result.get_jint();
++}
++
++// Load classes whose names are listed in a classlist file (one internal class name per line).
++// Used after a helper VM has extracted class names from a secondary AOT cache.
++static void load_and_link_classes_from_secondary_classlist(const char* classlist_path, TRAPS) {
++  FILE* f = os::fopen(classlist_path, "r"); // NOLINT
++  if (f == nullptr) {
++    log_warning(aot, merge)("Cannot open secondary classlist %s; skipping", classlist_path);
++    return;
++  }
++
++  // this is important before allocation
++  HandleMark hm(THREAD);
++  Handle boot_loader;  // null = bootstrap class loader
++  Handle sys_loader(THREAD, SystemDictionary::java_system_loader());
++
++  int loaded = 0;
++  int skipped = 0;
++  char line[4096];
++  while (fgets(line, sizeof(line), f) != nullptr) {
++    // Strip trailing newline/carriage-return
++    int len = (int)strlen(line);
++    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
++      line[--len] = '\0';
++    }
++    if (len == 0) continue;
++
++    TempNewSymbol sym = SymbolTable::new_symbol(line);
++    // Try boot loader first, then app loader
++    Klass* k = SystemDictionary::resolve_or_null(sym, boot_loader, THREAD);
++    if (HAS_PENDING_EXCEPTION) CLEAR_PENDING_EXCEPTION;
++    if (k == nullptr) {
++      k = SystemDictionary::resolve_or_null(sym, sys_loader, THREAD);
++      if (HAS_PENDING_EXCEPTION) CLEAR_PENDING_EXCEPTION;
++    }
++    if (k != nullptr) {
++      if (k->is_instance_klass()) {
++        MetaspaceShared::try_link_class(THREAD, InstanceKlass::cast(k));
++        // if any class fails here, it won't be included in the preimage
++        if (HAS_PENDING_EXCEPTION) CLEAR_PENDING_EXCEPTION;
++      }
++      loaded++;
++      log_debug(aot, merge)("  loaded secondary class: %s", line);
++    } else {
++      skipped++;
++      log_debug(aot, merge)("  skipped (not resolvable): %s", line);
++    }
++  }
++  fclose(f);
++  log_info(aot, merge)("Secondary classlist %s: loaded %d, skipped %d classes",
++                        classlist_path, loaded, skipped);
++}
++
++// For each secondary cache in CDSConfig::merge_input_paths(), fork a helper VM to extract
++// class names, then load those classes in the main VM from the classpath.
++static void extract_classes_from_secondary_caches(TRAPS) {
++  int n = CDSConfig::num_merge_inputs();
++  for (int i = 0; i < n; i++) {
++    const char* cache_path = CDSConfig::merge_input_at(i);
++    log_info(aot, merge)("Extracting classes from secondary cache[%d]: %s", i, cache_path);
++
++    // Build temp classlist path: <AOTCacheOutput>.classlist.<i>
++    size_t len = strlen(AOTCacheOutput) + 32;
++    char* classlist_path = AllocateHeap(len, mtArguments);
++    jio_snprintf(classlist_path, len, "%s.classlist.%d", AOTCacheOutput, i);
++
++    log_info(aot, merge)("  Forking helper VM; classlist temp file: %s", classlist_path);
++    int status = fork_extract_helper(cache_path, classlist_path, CHECK);
++    if (status != 0) {
++      log_warning(aot, merge)("  Helper VM exited with status %d for %s; skipping", status, cache_path);
++      FreeHeap(classlist_path);
++      continue;
++    }
++
++    load_and_link_classes_from_secondary_classlist(classlist_path, CHECK);
++
++    // Delete temp classlist
++    if (::remove(classlist_path) != 0) {
++      log_debug(aot, merge)("  Could not delete temp classlist %s", classlist_path);
++    }
++    FreeHeap(classlist_path);
++  }
++}
++
++void MetaspaceShared::start_merging_aot_cache(TRAPS) {
++  if (!CDSConfig::is_merging_aot_cache()) {
++    return;
++  }
++
++  // this is important so that we can allocate memory for new classes during the merge
++  ResourceMark rm;
++
++  const char* cache_path = CDSConfig::input_static_archive_path();
++  log_info(aot, merge)("Starting AOT cache merge with input cache: %s", cache_path);
++
++  FileMapInfo* mapinfo = FileMapInfo::current_info();
++  if (mapinfo == nullptr) {
++    log_error(aot, merge)("Cannot merge: AOT cache was not loaded at startup");
++    return;
++  }
++
++  FileMapHeader* header = mapinfo->header();
++  log_info(aot, merge)("AOT cache header: version %d, has_aot_linked_classes=%d, has_platform_or_app_classes=%d",
++                       header->version(),
++                       header->has_aot_linked_classes(),
++                       header->has_platform_or_app_classes());
++
++  for (int i = 0; i < NUM_CDS_REGIONS; i++) {
++    FileMapRegion* r = header->region_at(i);
++    log_info(aot, merge)("  region[%d]: used=%zu bytes", i, r->used());
++  }
++
++  // This enables the dumping machinery
++  CDSConfig::enable_dumping_static_archive();
++  // This specifically enables the dumping of the preimage archive (.aot.config)
++  CDSConfig::enable_dumping_preimage_static_archive();
++  CDSConfig::set_output_archive_path(AOTConfiguration);
++
++  JavaThread* current = JavaThread::current();
++  AOTClassLocationConfig::dumptime_init(current);
++  if (current->has_pending_exception()) {
++    log_error(aot, merge)("Cannot merge: failed to initialize classpath location config");
++    return;
++  }
++  SystemDictionaryShared::initialize();
++  AOTClassLinker::initialize();
++
++  if (CDSConfig::has_merge_inputs()) {
++    extract_classes_from_secondary_caches(CHECK);
++  }
++
++  GrowableArray<Klass*> archived;
++  SystemDictionaryShared::get_all_archived_classes(true, &archived);
++  log_info(aot, merge)("Found %d classes in archived dictionaries", archived.length());
++
++  // Cap shared_classpath_index for classes from the primary archive.
++  // The primary archive may have been built with more classpath entries (e.g. 64)
++  // than the merge run (e.g. 4). Out-of-range indices cause a SIGSEGV in
++  // CDSProtectionDomain::init_security_info when the assembly child dereferences
++  // past the end of AOTClassLocationConfig. Capping to app_cp_start_index keeps
++  // the index in range. The wrong jar association is harmless: at runtime,
++  // is_archived_class_visible_on_classpath falls back to
++  // is_class_in_current_classpath which searches by class name, not by index.
++  {
++    const AOTClassLocationConfig* new_config = AOTClassLocationConfig::dumptime();
++
++    if (new_config != nullptr) {
++      int new_len = new_config->length();
++      int fallback_idx = (new_config->app_cp_start_index() < new_len)
++                         ? new_config->app_cp_start_index() : 0;
++      int capped_count = 0;
++
++      for (int i = 0; i < archived.length(); i++) {
++        Klass* k = archived.at(i);
++        if (!k->is_instance_klass()) continue;
++        InstanceKlass* ik = InstanceKlass::cast(k);
++
++        int old_idx = ik->shared_classpath_index();
++        if (old_idx < 0 || old_idx < new_len) continue; // in range or unregistered
++
++        log_debug(aot, merge)("Classpath index cap: %s index %d -> %d (out of range, max %d)",
++                              ik->external_name(), old_idx, fallback_idx, new_len);
++        ik->set_shared_classpath_index(fallback_idx);
++        capped_count++;
++      }
++
++      if (capped_count > 0) {
++        log_info(aot, merge)("Capped %d out-of-range classpath indices to %d (config has %d entries)",
++                             capped_count, fallback_idx, new_len);
++      }
++    }
++  }
++
++  // Add loaded from classfiles during this run.
++  GrowableArray<InstanceKlass*> newly_loaded_classes;
++  // We put all classes instead of only the new ones so that dependencies of new classes can also be cached.
++  collect_loaded_classes_for_merge(&newly_loaded_classes);
++
++  for (int i = 0; i < newly_loaded_classes.length(); i++) {
++    InstanceKlass* ik = newly_loaded_classes.at(i);
++    if (ik->shared_classpath_index() != -1 || ik->is_hidden()) {
++      continue;
++    }
++    oop loader = ik->class_loader();
++    if (loader == nullptr) {
++      int classpath_index = 0; // boot classpath (modules image)
++      AOTClassLocationConfig::dumptime_update_max_used_index(classpath_index);
++      ik->set_shared_classpath_index(classpath_index);
++      log_debug(aot, merge)("  assigned classpath_index=%d (boot) to %s",
++                            classpath_index, ik->external_name());
++    } else if (SystemDictionary::is_system_class_loader(loader)) {
++      int classpath_index = AOTClassLocationConfig::dumptime()->app_cp_start_index();
++      AOTClassLocationConfig::dumptime_set_has_app_classes();
++      AOTClassLocationConfig::dumptime_update_max_used_index(classpath_index);
++      ik->set_shared_classpath_index(classpath_index);
++      log_debug(aot, merge)("  assigned classpath_index=%d (app) to %s",
++                            classpath_index, ik->external_name());
++    } else if (SystemDictionary::is_platform_class_loader(loader)) {
++      int classpath_index = 0;
++      AOTClassLocationConfig::dumptime_set_has_platform_classes();
++      AOTClassLocationConfig::dumptime_update_max_used_index(classpath_index);
++      ik->set_shared_classpath_index(classpath_index);
++      log_debug(aot, merge)("  assigned classpath_index=%d (platform) to %s",
++                            classpath_index, ik->external_name());
++    } else {
++      ik->set_shared_classpath_index(UNREGISTERED_INDEX);
++      log_debug(aot, merge)("  assigned UNREGISTERED_INDEX to %s (custom loader)",
++                            ik->external_name());
++    }
++  }
++
++  // Makes symbol permanent; not sure what that means
++  for (int i = 0; i < newly_loaded_classes.length(); i++) {
++    InstanceKlass* ik = newly_loaded_classes.at(i);
++    ik->name()->make_permanent();
++    ConstantPool* cp = ik->constants();
++    for (int j = 1; j < cp->length(); j++) {
++      if (cp->tag_at(j).is_utf8()) {
++        Symbol* sym = cp->symbol_at(j);
++        if (sym != nullptr) {
++          sym->make_permanent();
++        }
++      }
++    }
++  }
++
++  GrowableArray<Klass*> classes_for_merged_aot_cache;
++  for (int i = 0; i < newly_loaded_classes.length(); i++) {
++    if (newly_loaded_classes.at(i)->is_hidden()) {
++      continue;
++    }
++    // TODO: find a better way to fix proxy classes
++    // Its shared_classpath_index is not -1 based on some tests
++    // Skip dynamically generated proxy classes created at runtime (e.g. jdk/proxy1/$Proxy1).
++    // They cannot be loaded from any JAR in Phase 2, and their ConstantPools may reference
++    // other proxy classes that have no DumpTimeClassInfo, causing crashes in is_excluded().
++    if (strstr(newly_loaded_classes.at(i)->external_name(), "$Proxy") != nullptr) {
++      log_debug(aot, merge)("  skipping dynamically generated proxy class: %s",
++                            newly_loaded_classes.at(i)->external_name());
++      continue;
++    }
++    classes_for_merged_aot_cache.append(newly_loaded_classes.at(i));
++  }
++
++  for (int i = 0; i < archived.length(); i++) {
++    if (archived.at(i)->is_hidden()) {
++      continue;
++    }
++    // Skip archived classes whose jars are not on the current classpath
++    if (archived.at(i)->is_instance_klass()) {
++      InstanceKlass* ik = InstanceKlass::cast(archived.at(i));
++      if (ik->shared_classpath_index() == UNREGISTERED_INDEX && !ik->defined_by_other_loaders()) {
++        log_debug(aot, merge)("  skipping excluded archived class: %s", ik->external_name());
++        continue;
++      }
++    }
++    classes_for_merged_aot_cache.append(archived.at(i));
++  }
++
++  for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
++    log_debug(aot, merge)("class for merged cache %s", classes_for_merged_aot_cache.at(i)->external_name());
++  }
++  log_info(aot, merge)("Total classes for merged preimage: %d", classes_for_merged_aot_cache.length());
++
++  for (int i = 0; i < classes_for_merged_aot_cache.length(); i++) {
++    Klass* k = classes_for_merged_aot_cache.at(i);
++    if (k->is_hidden()) {
++      continue;
++    }
++    if (k->is_instance_klass()) {
++      InstanceKlass* ik = InstanceKlass::cast(k);
++      SystemDictionaryShared::init_dumptime_info(ik);
++    }
++  }
++
++  log_info(aot, merge)("Dumping merged preimage to %s", AOTConfiguration);
++  CDSConfig::DumperThreadMark dumper_thread_mark(current);
++  StaticArchiveBuilder builder;
++  VM_PopulateDumpSharedSpace op(builder);
++  VMThread::execute(&op);
++  bool status = write_static_archive(&builder, op.map_info(), op.heap_info());
++
++  if (status) {
++    tty->print_cr("%s AOTConfiguration recorded: %s",
++                  CDSConfig::has_temp_aot_config_file() ? "Temporary" : "", AOTConfiguration);
++
++    // crashes without this because I assume we want to load the classes again during assembly phase
++    UseSharedSpaces = false;
++    fork_and_dump_final_static_archive(CHECK);
++  } else {
++    log_error(aot, merge)("Merged preimage dump failed");
++  }
++}
+diff --git a/src/hotspot/share/cds/metaspaceShared.hpp b/src/hotspot/share/cds/metaspaceShared.hpp
+index 130e7fe4484..ee08ba8ca43 100644
+--- a/src/hotspot/share/cds/metaspaceShared.hpp
++++ b/src/hotspot/share/cds/metaspaceShared.hpp
+@@ -135,6 +135,10 @@ class MetaspaceShared : AllStatic {
+   static void link_shared_classes(TRAPS) NOT_CDS_RETURN;
+   static bool may_be_eagerly_linked(InstanceKlass* ik) NOT_CDS_RETURN_(false);
+ 
++  // AOT cache merging at runtime
++  static void start_merging_aot_cache(TRAPS) NOT_CDS_RETURN;
++  static void collect_loaded_classes_for_merge(GrowableArray<InstanceKlass*>* new_classes) NOT_CDS_RETURN;
++
+ #if INCLUDE_CDS
+   // Alignment for the 2 core CDS regions (RW/RO) only.
+   // (Heap region alignments are decided by GC).
+@@ -147,6 +151,8 @@ class MetaspaceShared : AllStatic {
+ 
+   // Allocate a block of memory from the temporary "symbol" region.
+   static char* symbol_space_alloc(size_t num_bytes);
++  // This ensures that symbols are not allocated on archive
++  static bool  symbol_space_is_allocatable();
+ 
+   // This is the base address as specified by -XX:SharedBaseAddress during -Xshare:dump.
+   // Both the base/top archives are written using this as their base address.
+diff --git a/src/hotspot/share/cds/regeneratedClasses.cpp b/src/hotspot/share/cds/regeneratedClasses.cpp
+index 38bf1a11952..77d8472226d 100644
+--- a/src/hotspot/share/cds/regeneratedClasses.cpp
++++ b/src/hotspot/share/cds/regeneratedClasses.cpp
+@@ -77,7 +77,13 @@ void RegeneratedClasses::record_regenerated_objects() {
+   assert_locked_or_safepoint(DumpTimeTable_lock);
+   if (_renegerated_objs != nullptr) {
+     auto doit = [&] (address orig_obj, address regen_obj) {
+-      ArchiveBuilder::current()->record_regenerated_object(orig_obj, regen_obj);
++      // The regen klass/method may have been excluded by the dump-time exclusion
++      // pass (e.g. SystemDictionaryShared::has_been_redefined() returns true after
++      // a JVMTI agent retransforms java.lang.Object). In that case _src_obj_table
++      // has no entry for regen_obj and record_regenerated_object would deref null.
++      if (ArchiveBuilder::current()->has_been_archived(regen_obj)) {
++        ArchiveBuilder::current()->record_regenerated_object(orig_obj, regen_obj);
++      }
+     };
+     _renegerated_objs->iterate_all(doit);
+   }
+diff --git a/src/hotspot/share/classfile/classLoaderDataShared.cpp b/src/hotspot/share/classfile/classLoaderDataShared.cpp
+index 94ded38f5da..dc86a4049fb 100644
+--- a/src/hotspot/share/classfile/classLoaderDataShared.cpp
++++ b/src/hotspot/share/classfile/classLoaderDataShared.cpp
+@@ -184,6 +184,13 @@ void ClassLoaderDataShared::init_archived_tables() {
+ }
+ 
+ void ClassLoaderDataShared::serialize(SerializeClosure* f) {
++  if (f->writing() && CDSConfig::is_merging_aot_cache()) {
++    // In merge mode, these contain stale pointers from the old archive.
++    _archived_boot_loader_data = ArchivedClassLoaderData();
++    _archived_platform_loader_data = ArchivedClassLoaderData();
++    _archived_system_loader_data = ArchivedClassLoaderData();
++    _archived_javabase_moduleEntry = nullptr;
++  }
+   _archived_boot_loader_data.serialize(f);
+   _archived_platform_loader_data.serialize(f);
+   _archived_system_loader_data.serialize(f);
+diff --git a/src/hotspot/share/classfile/klassFactory.cpp b/src/hotspot/share/classfile/klassFactory.cpp
+index f2f31de4a37..5097c035203 100644
+--- a/src/hotspot/share/classfile/klassFactory.cpp
++++ b/src/hotspot/share/classfile/klassFactory.cpp
+@@ -32,6 +32,7 @@
+ #include "classfile/classLoadInfo.hpp"
+ #include "classfile/klassFactory.hpp"
+ #include "classfile/systemDictionaryShared.hpp"
++ #include "classfile/vmClasses.hpp"
+ #include "memory/resourceArea.hpp"
+ #include "prims/jvmtiEnvBase.hpp"
+ #include "prims/jvmtiRedefineClasses.hpp"
+@@ -186,7 +187,9 @@ InstanceKlass* KlassFactory::create_from_stream(ClassFileStream* stream,
+   THREAD->statistical_info().incr_define_class_count();
+ 
+   // Skip this processing for VM hidden classes
+-  if (!cl_info.is_hidden()) {
++  bool skip_load_hook_for_vmclass =
++      CDSConfig::is_dumping_archive() && name != nullptr && vmClasses::contain(name);
++  if (!cl_info.is_hidden() && !skip_load_hook_for_vmclass) {
+     stream = check_class_file_load_hook(stream,
+                                         name,
+                                         loader_data,
+@@ -219,6 +222,11 @@ InstanceKlass* KlassFactory::create_from_stream(ClassFileStream* stream,
+ #if INCLUDE_CDS
+   if (CDSConfig::is_dumping_archive()) {
+     ClassLoader::record_result(THREAD, result, stream, old_stream != stream);
++  } else if (CDSConfig::is_merging_aot_cache() && !result->is_hidden()) {
++    ClassLoaderData* cld = result->class_loader_data();
++    if (cld != nullptr && !SystemDictionaryShared::is_builtin_loader(cld)) {
++      SystemDictionaryShared::save_classfile_crc_for_merge(result, stream);
++    }
+   }
+ #endif // INCLUDE_CDS
+ 
+diff --git a/src/hotspot/share/classfile/stringTable.cpp b/src/hotspot/share/classfile/stringTable.cpp
+index 957ecd8ebe8..2fba53e1a43 100644
+--- a/src/hotspot/share/classfile/stringTable.cpp
++++ b/src/hotspot/share/classfile/stringTable.cpp
+@@ -1113,6 +1113,9 @@ void StringTable::set_shared_strings_array_index(int root_index) {
+ }
+ 
+ void StringTable::serialize_shared_table_header(SerializeClosure* soc) {
++  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
++    _shared_table.reset();
++  }
+   _shared_table.serialize_header(soc);
+ 
+   if (soc->writing()) {
+diff --git a/src/hotspot/share/classfile/symbolTable.cpp b/src/hotspot/share/classfile/symbolTable.cpp
+index e6889e6248d..2935d96b4c0 100644
+--- a/src/hotspot/share/classfile/symbolTable.cpp
++++ b/src/hotspot/share/classfile/symbolTable.cpp
+@@ -25,6 +25,7 @@
+ #include "cds/archiveBuilder.hpp"
+ #include "cds/cdsConfig.hpp"
+ #include "cds/dynamicArchive.hpp"
++#include "cds/metaspaceShared.hpp"
+ #include "classfile/altHashing.hpp"
+ #include "classfile/classLoaderData.hpp"
+ #include "classfile/compactHashtable.hpp"
+@@ -175,7 +176,7 @@ class SymbolTableConfig : public AllStatic {
+   static void* allocate_node_impl(size_t size, Value const& value) {
+     size_t alloc_size = SymbolTableHash::get_dynamic_node_size(value.byte_size());
+ #if INCLUDE_CDS
+-    if (CDSConfig::is_dumping_static_archive()) {
++    if (CDSConfig::is_dumping_static_archive() && MetaspaceShared::symbol_space_is_allocatable()) {
+       MutexLocker ml(DumpRegion_lock, Mutex::_no_safepoint_check_flag);
+       // To get deterministic output from -Xshare:dump, we ensure that Symbols are allocated in
+       // increasing addresses. When the symbols are copied into the archive, we preserve their
+diff --git a/src/hotspot/share/classfile/systemDictionary.cpp b/src/hotspot/share/classfile/systemDictionary.cpp
+index b1abb2ab0fe..0660347008f 100644
+--- a/src/hotspot/share/classfile/systemDictionary.cpp
++++ b/src/hotspot/share/classfile/systemDictionary.cpp
+@@ -944,7 +944,21 @@ bool SystemDictionary::is_shared_class_visible(Symbol* class_name,
+     }
+   }
+ 
+-  // (2) Check if we are loading into the same module from the same location as in dump time.
++  // (2) Check if the class's source JAR is on the current classpath, or if the
++  //     class file exists in a current classpath entry (fat JAR case). This prevents
++  //     loading cached classes whose dependencies aren't available.
++  if (!CDSConfig::is_dumping_final_static_archive() &&
++      ik->defined_by_app_loader() && !ik->is_hidden() &&
++      !AOTClassLocationConfig::is_archived_class_visible_on_classpath(ik->shared_classpath_index())) {
++    // Path didn't match — check if the class file exists on the classpath
++    ResourceMark rm;
++    const char* cname = ik->name()->as_C_string();
++    if (!AOTClassLocationConfig::is_class_in_current_classpath(cname)) {
++      return false;
++    }
++  }
++
++  // (3) Check if we are loading into the same module from the same location as in dump time.
+ 
+   if (CDSConfig::is_using_optimized_module_handling()) {
+     // Class visibility has not changed between dump time and run time, so a class
+diff --git a/src/hotspot/share/classfile/systemDictionaryShared.cpp b/src/hotspot/share/classfile/systemDictionaryShared.cpp
+index 3c55b10e025..a42e2e0c0b4 100644
+--- a/src/hotspot/share/classfile/systemDictionaryShared.cpp
++++ b/src/hotspot/share/classfile/systemDictionaryShared.cpp
+@@ -87,6 +87,15 @@ DumpTimeSharedClassTable* SystemDictionaryShared::_dumptime_table = nullptr;
+ // Used by NoClassLoadingMark
+ DEBUG_ONLY(bool SystemDictionaryShared::_class_loading_may_happen = true;)
+ 
++// This is needed because ClassLoader::record_result() is not called
++// during the merge run (is_dumping_archive() is false at that point).
++struct MergeCrcEntry {
++  InstanceKlass* klass;
++  int clsfile_size;
++  int clsfile_crc32;
++};
++static GrowableArrayCHeap<MergeCrcEntry, mtClass>* _merge_crc_entries = nullptr;
++
+ #ifdef ASSERT
+ static void check_klass_after_loading(const Klass* k) {
+ #ifdef _LP64
+@@ -250,9 +259,19 @@ bool SystemDictionaryShared::is_early_klass(InstanceKlass* ik) {
+ }
+ 
+ bool SystemDictionaryShared::check_for_exclusion_impl(InstanceKlass* k) {
+-  if (CDSConfig::is_dumping_final_static_archive() && k->defined_by_other_loaders()
++  // Exclude test framework classes from all archiving paths — they are not needed at runtime
++  // TODO: maybe a better approach would be to check if their JARs are from test-classes dir in maven project
++  {
++    ResourceMark rm;
++    const char* name = k->external_name();
++    if (strstr(name, "junit.") != nullptr || strstr(name, "surefire.") != nullptr) {
++      return true; // exclude without warning
++    }
++  }
++
++  if ((CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache())
+       && k->is_shared()) {
+-    return false; // Do not exclude: unregistered classes are passed from preimage to final image.
++    return false; // Do not exclude: shared classes are passed from input archive to merged/final image.
+   }
+ 
+   if (k->is_in_error_state()) {
+@@ -265,7 +284,16 @@ bool SystemDictionaryShared::check_for_exclusion_impl(InstanceKlass* k) {
+     return warn_excluded(k, "Not in loaded state");
+   }
+   if (has_been_redefined(k)) {
+-    return warn_excluded(k, "Has been redefined");
++    // vmClasses (e.g. java.lang.Object) are hard-referenced by
++    // SystemDictionaryShared::serialize_vm_classes and cannot be excluded from
++    // the archive. Excluding Object is especially fatal: the super-class
++    // exclusion check below cascades the exclusion to every InstanceKlass in
++    // the JVM, and the dump then crashes in ArchiveBuilder::get_buffered_addr
++    // while serializing vmClasses. JVMTI agents (Mockito-inline, JaCoCo, etc.)
++    // routinely retransform Object, so this path is reachable in practice.
++    if (!vmClasses::contain(k)) {
++      return warn_excluded(k, "Has been redefined");
++    }
+   }
+   if (!k->is_hidden() && k->shared_classpath_index() < 0 && is_builtin(k)) {
+     if (k->name()->starts_with("java/lang/invoke/BoundMethodHandle$Species_")) {
+@@ -476,8 +504,6 @@ InstanceKlass* SystemDictionaryShared::get_unregistered_class(Symbol* name) {
+ }
+ 
+ void SystemDictionaryShared::copy_unregistered_class_size_and_crc32(InstanceKlass* klass) {
+-  precond(CDSConfig::is_dumping_final_static_archive());
+-  precond(klass->is_shared());
+ 
+   // A shared class must have a RunTimeClassInfo record
+   const RunTimeClassInfo* record = find_record(&_static_archive._unregistered_dictionary,
+@@ -498,6 +524,34 @@ void SystemDictionaryShared::set_shared_class_misc_info(InstanceKlass* k, ClassF
+   info->_clsfile_crc32 = ClassLoader::crc32(0, (const char*)cfs->buffer(), cfs->length());
+ }
+ 
++void SystemDictionaryShared::save_classfile_crc_for_merge(InstanceKlass* k, const ClassFileStream* cfs) {
++  assert(CDSConfig::is_merging_aot_cache(), "only during merge");
++  if (_merge_crc_entries == nullptr) {
++    _merge_crc_entries = new GrowableArrayCHeap<MergeCrcEntry, mtClass>(64);
++  }
++  MergeCrcEntry entry;
++  entry.klass = k;
++  entry.clsfile_size = cfs->length();
++  entry.clsfile_crc32 = ClassLoader::crc32(0, (const char*)cfs->buffer(), cfs->length());
++  _merge_crc_entries->append(entry);
++  log_debug(aot, merge)("Saved CRC for %s: size=%d crc32=%d", k->external_name(), entry.clsfile_size, entry.clsfile_crc32);
++}
++
++bool SystemDictionaryShared::apply_saved_merge_crc(InstanceKlass* k) {
++  if (_merge_crc_entries != nullptr) {
++    for (int i = 0; i < _merge_crc_entries->length(); i++) {
++      MergeCrcEntry& entry = _merge_crc_entries->at(i);
++      if (entry.klass == k) {
++        DumpTimeClassInfo* info = get_info(k);
++        info->_clsfile_size = entry.clsfile_size;
++        info->_clsfile_crc32 = entry.clsfile_crc32;
++        return true;
++      }
++    }
++  }
++  return false;
++}
++
+ void SystemDictionaryShared::initialize() {
+   if (CDSConfig::is_dumping_archive()) {
+     _dumptime_table = new (mtClass) DumpTimeSharedClassTable;
+@@ -560,22 +614,18 @@ void SystemDictionaryShared::init_dumptime_info_from_preimage(InstanceKlass* k)
+   }
+ }
+ 
+-// Check if a class or any of its supertypes has been redefined.
++// Check if a class has been redefined.
++//
++// Historically this also walked java_super() and local_interfaces() recursively.
++// That is catastrophic in practice: any JVMTI agent that retransforms
++// java.lang.Object (e.g. Mockito-inline) causes every InstanceKlass in the JVM
++// to report "redefined", which excludes them all from the AOT archive --
++// including vmClasses that are hard-referenced by serialize_vm_classes(), which
++// then crashes in ArchiveBuilder::get_buffered_addr() during the dump.
++// Only the class itself needs to be checked here; supertype redefinitions are
++// reflected in this class via the normal redefinition machinery.
+ bool SystemDictionaryShared::has_been_redefined(InstanceKlass* k) {
+-  if (k->has_been_redefined()) {
+-    return true;
+-  }
+-  if (k->java_super() != nullptr && has_been_redefined(k->java_super())) {
+-    return true;
+-  }
+-  Array<InstanceKlass*>* interfaces = k->local_interfaces();
+-  int len = interfaces->length();
+-  for (int i = 0; i < len; i++) {
+-    if (has_been_redefined(interfaces->at(i))) {
+-      return true;
+-    }
+-  }
+-  return false;
++  return k->has_been_redefined();
+ }
+ 
+ // k is a class before relocating by ArchiveBuilder
+@@ -586,6 +636,11 @@ void SystemDictionaryShared::validate_before_archiving(InstanceKlass* k) {
+   assert(!class_loading_may_happen(), "class loading must be disabled");
+   guarantee(info != nullptr, "Class %s must be entered into _dumptime_table", name);
+   guarantee(!info->is_excluded(), "Should not attempt to archive excluded class %s", name);
++  if (CDSConfig::is_merging_aot_cache()) {
++    // In merge mode, classes may have been loaded by custom classloaders but assigned
++    // a builtin classpath index for archiving. Skip the loader type validation.
++    return;
++  }
+   if (is_builtin(k)) {
+     if (k->is_hidden()) {
+       if (CDSConfig::is_dumping_lambdas_in_legacy_mode()) {
+@@ -756,6 +811,11 @@ void SystemDictionaryShared::dumptime_classes_do(MetaspaceClosure* it) {
+     if (CDSConfig::is_dumping_final_static_archive() && !k->is_loaded()) {
+       assert(k->defined_by_other_loaders(), "must be");
+       info.metaspace_pointers_do(it);
++    } else if (CDSConfig::is_merging_aot_cache() && k->is_shared() && k->class_loader_data() == nullptr) {
++      // Shared class from input cache, not loaded during merge run. Include it.
++      if (!info.is_excluded()) {
++        info.metaspace_pointers_do(it);
++      }
+     } else if (k->is_loader_alive() && !info.is_excluded()) {
+       info.metaspace_pointers_do(it);
+     }
+@@ -781,6 +841,14 @@ void SystemDictionaryShared::add_verification_constraint(InstanceKlass* k, Symbo
+          Symbol* from_name, bool from_field_is_protected, bool from_is_array, bool from_is_object,
+          bool* skip_assignability_check) {
+   assert(CDSConfig::is_dumping_archive(), "sanity");
++  if (!k->is_shared() && _dumptime_table->get(k) == nullptr) {
++    // Class was loaded before dump mode was enabled (e.g., as a transitive dependency
++    // during JVM startup, before start_merging_aot_cache calls enable_dumping_static_archive).
++    // Klass::set_name would not have called init_dumptime_info. Lazily register it now
++    // so that add_verification_constraint below does not crash on a null DumpTimeClassInfo.
++    // This also covers superclasses recursively linked during link_class_impl.
++    init_dumptime_info(k);
++  }
+   DumpTimeClassInfo* info = get_info(k);
+   info->add_verification_constraint(k, name, from_name, from_field_is_protected,
+                                     from_is_array, from_is_object);
+@@ -1172,6 +1240,9 @@ void SystemDictionaryShared::get_all_archived_classes(bool is_static_archive, Gr
+   get_archive(is_static_archive)->_builtin_dictionary.iterate([&] (const RunTimeClassInfo* record) {
+       classes->append(record->klass());
+     });
++  get_archive(is_static_archive)->_unregistered_dictionary.iterate([&](const RunTimeClassInfo* record) {
++    classes->append(record->klass());
++});
+ }
+ 
+ class SharedDictionaryPrinter : StackObj {
+diff --git a/src/hotspot/share/classfile/systemDictionaryShared.hpp b/src/hotspot/share/classfile/systemDictionaryShared.hpp
+index 6ce50489a6c..72749ba5a45 100644
+--- a/src/hotspot/share/classfile/systemDictionaryShared.hpp
++++ b/src/hotspot/share/classfile/systemDictionaryShared.hpp
+@@ -221,6 +221,9 @@ class SystemDictionaryShared: public SystemDictionary {
+   static void update_shared_entry(InstanceKlass* klass, int id);
+   static void set_shared_class_misc_info(InstanceKlass* k, ClassFileStream* cfs);
+ 
++  static void save_classfile_crc_for_merge(InstanceKlass* k, const ClassFileStream* cfs);
++  static bool apply_saved_merge_crc(InstanceKlass* k);
++
+   static InstanceKlass* lookup_from_stream(Symbol* class_name,
+                                            Handle class_loader,
+                                            Handle protection_domain,
+diff --git a/src/hotspot/share/classfile/vmClasses.cpp b/src/hotspot/share/classfile/vmClasses.cpp
+index 813926e51a2..797cd9e25df 100644
+--- a/src/hotspot/share/classfile/vmClasses.cpp
++++ b/src/hotspot/share/classfile/vmClasses.cpp
+@@ -58,7 +58,6 @@ static const short vm_class_name_ids[] = {
+ };
+ 
+ 
+-#ifdef ASSERT
+ bool vmClasses::contain(Symbol* class_name) {
+   int sid;
+   for (int i = 0; (sid = vm_class_name_ids[i]) != 0; i++) {
+@@ -73,7 +72,6 @@ bool vmClasses::contain(Symbol* class_name) {
+ bool vmClasses::contain(Klass* k) {
+   return contain(k->name());
+ }
+-#endif
+ 
+ bool vmClasses::resolve(vmClassID id, TRAPS) {
+   InstanceKlass** klassp = &_klasses[as_int(id)];
+diff --git a/src/hotspot/share/classfile/vmClasses.hpp b/src/hotspot/share/classfile/vmClasses.hpp
+index 4fa078c50cd..675812aea60 100644
+--- a/src/hotspot/share/classfile/vmClasses.hpp
++++ b/src/hotspot/share/classfile/vmClasses.hpp
+@@ -65,11 +65,6 @@ class vmClasses : AllStatic {
+ 
+   static void resolve_shared_class(InstanceKlass* klass, ClassLoaderData* loader_data, Handle domain, TRAPS) NOT_CDS_RETURN;
+ 
+-#ifdef ASSERT
+-  static bool contain(Klass* k);
+-  static bool contain(Symbol* class_name);
+-#endif
+-
+   static InstanceKlass* _klasses[];
+ 
+   // table of box klasses (int_klass, etc.)
+@@ -94,6 +89,9 @@ class vmClasses : AllStatic {
+     return &_klasses[as_int(id)];
+   }
+ 
++  static bool contain(Klass* k);
++  static bool contain(Symbol* class_name);
++
+   static void resolve_all(TRAPS);
+ 
+   static BasicType box_klass_type(Klass* k);  // inverse of box_klass
+diff --git a/src/hotspot/share/code/aotCodeCache.cpp b/src/hotspot/share/code/aotCodeCache.cpp
+index 9e4462ec196..3ab8c7c2f65 100644
+--- a/src/hotspot/share/code/aotCodeCache.cpp
++++ b/src/hotspot/share/code/aotCodeCache.cpp
+@@ -557,15 +557,25 @@ void* AOTCodeEntry::operator new(size_t x, AOTCodeCache* cache) {
+   return (void*)(cache->add_entry());
+ }
+ 
+-static bool check_entry(AOTCodeEntry::Kind kind, uint id, AOTCodeEntry* entry) {
++static bool check_entry(AOTCodeEntry::Kind kind, uint id, AOTCodeEntry* entry,
++                        const char* name, const char* cache_buffer) {
+   if (entry->kind() == kind) {
+     assert(entry->id() == id, "sanity");
++    // When a name is provided, also verify it matches the stored name.
++    // This handles hash collisions where two different names map to the same id.
++    if (name != nullptr && cache_buffer != nullptr) {
++      uint name_offset = entry->offset() + entry->name_offset();
++      const char* stored_name = cache_buffer + name_offset;
++      if (strncmp(stored_name, name, entry->name_size() - 1) != 0) {
++        return false; // Same kind+id but different name — hash collision
++      }
++    }
+     return true; // Found
+   }
+   return false;
+ }
+ 
+-AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
++AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id, const char* name) {
+   assert(_for_use, "sanity");
+   uint count = _load_header->entries_count();
+   if (_load_entries == nullptr) {
+@@ -574,6 +584,7 @@ AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
+     _load_entries = (AOTCodeEntry*)(_search_entries + 2 * count);
+     log_debug(aot, codecache, init)("Read %d entries table at offset %d from AOT Code Cache", count, _load_header->entries_offset());
+   }
++  const char* buf = (name != nullptr) ? _load_buffer : nullptr;
+   // Binary search
+   int l = 0;
+   int h = count - 1;
+@@ -584,10 +595,10 @@ AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
+     if (is == id) {
+       int index = _search_entries[ix + 1];
+       AOTCodeEntry* entry = &(_load_entries[index]);
+-      if (check_entry(kind, id, entry)) {
++      if (check_entry(kind, id, entry, name, buf)) {
+         return entry; // Found
+       }
+-      // Linear search around to handle id collission
++      // Linear search around to handle id collision
+       for (int i = mid - 1; i >= l; i--) { // search back
+         ix = i * 2;
+         is = _search_entries[ix];
+@@ -596,7 +607,7 @@ AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
+         }
+         index = _search_entries[ix + 1];
+         AOTCodeEntry* entry = &(_load_entries[index]);
+-        if (check_entry(kind, id, entry)) {
++        if (check_entry(kind, id, entry, name, buf)) {
+           return entry; // Found
+         }
+       }
+@@ -608,7 +619,7 @@ AOTCodeEntry* AOTCodeCache::find_entry(AOTCodeEntry::Kind kind, uint id) {
+         }
+         index = _search_entries[ix + 1];
+         AOTCodeEntry* entry = &(_load_entries[index]);
+-        if (check_entry(kind, id, entry)) {
++        if (check_entry(kind, id, entry, name, buf)) {
+           return entry; // Found
+         }
+       }
+@@ -869,7 +880,7 @@ CodeBlob* AOTCodeCache::load_code_blob(AOTCodeEntry::Kind entry_kind, uint id, c
+   }
+   log_debug(aot, codecache, stubs)("Reading blob '%s' (id=%u, kind=%s) from AOT Code Cache", name, id, aot_code_entry_kind_name[entry_kind]);
+ 
+-  AOTCodeEntry* entry = cache->find_entry(entry_kind, encode_id(entry_kind, id));
++  AOTCodeEntry* entry = cache->find_entry(entry_kind, encode_id(entry_kind, id), name);
+   if (entry == nullptr) {
+     return nullptr;
+   }
+diff --git a/src/hotspot/share/code/aotCodeCache.hpp b/src/hotspot/share/code/aotCodeCache.hpp
+index eaced55cc50..536da38af2d 100644
+--- a/src/hotspot/share/code/aotCodeCache.hpp
++++ b/src/hotspot/share/code/aotCodeCache.hpp
+@@ -315,7 +315,7 @@ class AOTCodeCache : public CHeapObj<mtCode> {
+     return _store_entries;
+   }
+ 
+-  AOTCodeEntry* find_entry(AOTCodeEntry::Kind kind, uint id);
++  AOTCodeEntry* find_entry(AOTCodeEntry::Kind kind, uint id, const char* name = nullptr);
+ 
+   bool finish_write();
+ 
+diff --git a/src/hotspot/share/logging/logTag.hpp b/src/hotspot/share/logging/logTag.hpp
+index a0bd07ed61b..5846116d3b2 100644
+--- a/src/hotspot/share/logging/logTag.hpp
++++ b/src/hotspot/share/logging/logTag.hpp
+@@ -123,6 +123,7 @@ class outputStream;
+   LOG_TAG(marking) \
+   LOG_TAG(membername) \
+   LOG_TAG(memops) \
++  LOG_TAG(merge) \
+   LOG_TAG(metadata) \
+   LOG_TAG(metaspace) \
+   LOG_TAG(methodcomparator) \
+diff --git a/src/hotspot/share/oops/constantPool.cpp b/src/hotspot/share/oops/constantPool.cpp
+index 5b0ee298ddc..e812657fd04 100644
+--- a/src/hotspot/share/oops/constantPool.cpp
++++ b/src/hotspot/share/oops/constantPool.cpp
+@@ -443,13 +443,12 @@ void ConstantPool::remove_unshareable_info() {
+   }
+ 
+   bool update_resolved_reference = true;
+-  if (CDSConfig::is_dumping_final_static_archive()) {
++  if (CDSConfig::is_dumping_final_static_archive() || CDSConfig::is_merging_aot_cache()) {
+     ConstantPool* src_cp = ArchiveBuilder::current()->get_source_addr(this);
+     InstanceKlass* src_holder = src_cp->pool_holder();
+-    if (src_holder->defined_by_other_loaders()) {
+-      // Unregistered classes are not loaded in the AOT assembly phase. The resolved reference length
+-      // is already saved during the training run.
+-      precond(!src_holder->is_loaded());
++    if (src_holder->is_shared() && src_holder->class_loader_data() == nullptr) {
++      // Shared classes not loaded during the merge/final assembly phase. The resolved
++      // reference length is already saved from the input archive.
+       precond(resolved_reference_length() >= 0);
+       precond(resolved_references() == nullptr);
+       update_resolved_reference = false;
+diff --git a/src/hotspot/share/oops/instanceKlass.cpp b/src/hotspot/share/oops/instanceKlass.cpp
+index 4ff6cd341a9..559a0d6bbf7 100644
+--- a/src/hotspot/share/oops/instanceKlass.cpp
++++ b/src/hotspot/share/oops/instanceKlass.cpp
+@@ -2844,7 +2844,8 @@ bool InstanceKlass::can_be_verified_at_dumptime() const {
+   Array<InstanceKlass*>* interfaces = local_interfaces();
+   int len = interfaces->length();
+   for (int i = 0; i < len; i++) {
+-    if (!interfaces->at(i)->can_be_verified_at_dumptime()) {
++    InstanceKlass* iface = interfaces->at(i);
++    if (iface == nullptr || !iface->can_be_verified_at_dumptime()) {
+       return false;
+     }
+   }
+diff --git a/src/hotspot/share/runtime/flags/jvmFlagConstraintsRuntime.cpp b/src/hotspot/share/runtime/flags/jvmFlagConstraintsRuntime.cpp
+index efffa8ac753..84de429128d 100644
+--- a/src/hotspot/share/runtime/flags/jvmFlagConstraintsRuntime.cpp
++++ b/src/hotspot/share/runtime/flags/jvmFlagConstraintsRuntime.cpp
+@@ -56,10 +56,11 @@ JVMFlag::Error AOTModeConstraintFunc(ccstr value, bool verbose) {
+       strcmp(value, "record") != 0 &&
+       strcmp(value, "create") != 0 &&
+       strcmp(value, "auto") != 0 &&
+-      strcmp(value, "on") != 0) {
++      strcmp(value, "on") != 0 &&
++      strcmp(value, "merge") != 0) {
+     JVMFlag::printError(verbose,
+                         "Unrecognized value %s for AOTMode. Must be one of the following: "
+-                        "off, record, create, auto, on\n",
++                        "off, record, create, auto, on, merge\n",
+                         value);
+     return JVMFlag::VIOLATES_CONSTRAINT;
+   }
+diff --git a/src/hotspot/share/runtime/java.cpp b/src/hotspot/share/runtime/java.cpp
+index aa0b5dca3e4..145f6655aea 100644
+--- a/src/hotspot/share/runtime/java.cpp
++++ b/src/hotspot/share/runtime/java.cpp
+@@ -434,6 +434,8 @@ void before_exit(JavaThread* thread, bool halt) {
+   // run Java code.
+   DynamicArchive::dump_at_exit(thread);
+   assert(!thread->has_pending_exception(), "must be");
++
++  MetaspaceShared::start_merging_aot_cache(thread);
+ #endif
+ 
+   // Actual shutdown logic begins here.
+@@ -447,7 +449,7 @@ void before_exit(JavaThread* thread, bool halt) {
+ #if INCLUDE_CDS
+   ClassListWriter::write_resolved_constants();
+ 
+-  if (CDSConfig::is_dumping_preimage_static_archive()) {
++  if (CDSConfig::is_dumping_preimage_static_archive() && !CDSConfig::is_merging_aot_cache()) {
+     MetaspaceShared::preload_and_dump(thread);
+   }
+ #endif
+diff --git a/src/hotspot/share/runtime/sharedRuntime.cpp b/src/hotspot/share/runtime/sharedRuntime.cpp
+index 9c710fc98e4..39d9b7e3d0e 100644
+--- a/src/hotspot/share/runtime/sharedRuntime.cpp
++++ b/src/hotspot/share/runtime/sharedRuntime.cpp
+@@ -24,6 +24,7 @@
+ 
+ #include "cds/archiveBuilder.hpp"
+ #include "cds/archiveUtils.inline.hpp"
++#include "cds/cdsConfig.hpp"
+ #include "classfile/classLoader.hpp"
+ #include "classfile/javaClasses.inline.hpp"
+ #include "classfile/stringTable.hpp"
+@@ -2934,6 +2935,9 @@ void AdapterHandlerLibrary::dump_aot_adapter_table() {
+ }
+ 
+ void AdapterHandlerLibrary::serialize_shared_table_header(SerializeClosure* soc) {
++  if (soc->writing() && CDSConfig::is_merging_aot_cache()) {
++    _aot_adapter_handler_table.reset();
++  }
+   _aot_adapter_handler_table.serialize_header(soc);
+ }
+ 
