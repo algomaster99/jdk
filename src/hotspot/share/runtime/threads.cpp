@@ -110,6 +110,7 @@
 #include "utilities/vmError.hpp"
 #ifdef COMPILER2
 #include "opto/idealGraphPrinter.hpp"
+#include "runtime/aiJitAgent.hpp"
 #include "runtime/hotCodeCollector.hpp"
 #endif
 #if INCLUDE_JFR
@@ -776,6 +777,9 @@ jint Threads::create_vm(JavaVMInitArgs* args, bool* canTryAgain) {
 #ifdef COMPILER2
   if (HotCodeHeap) {
     HotCodeCollector::initialize();
+  }
+  if (AIJitAgent) {
+    AIJitAgentThread::initialize();
   }
 #endif // COMPILER2
 

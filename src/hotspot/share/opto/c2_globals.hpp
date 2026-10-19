@@ -1002,6 +1002,29 @@
           "Number of levels of callees to relocate per candidate")          \
           range(0, max_juint)                                               \
                                                                             \
+  product(bool, AIJitAgent, false, EXPERIMENTAL,                            \
+          "Periodically send a profile of hot C2 methods to an external "   \
+          "agent and recompile them with the hints it returns")             \
+                                                                            \
+  product(ccstr, AIJitAgentCommand, nullptr, EXPERIMENTAL,                  \
+          "Agent command; invoked as '<cmd> <profile.json> <hints.txt>'")   \
+                                                                            \
+  product(uint, AIJitAgentIntervalMillis, 3000, EXPERIMENTAL,               \
+          "Milliseconds to wait before each agent round")                   \
+          range(0, max_juint)                                               \
+                                                                            \
+  product(uint, AIJitAgentSampleMillis, 1000, EXPERIMENTAL,                 \
+          "Milliseconds to sample application threads per agent round")     \
+          range(0, max_juint)                                               \
+                                                                            \
+  product(uint, AIJitAgentRounds, 3, EXPERIMENTAL,                          \
+          "Number of profile/hint rounds before the agent thread exits")    \
+          range(0, 100)                                                     \
+                                                                            \
+  product(uint, AIJitAgentMaxMethods, 8, EXPERIMENTAL,                      \
+          "Maximum number of hot methods sent to the agent per round")      \
+          range(1, 64)                                                      \
+                                                                            \
   /* Next three AOT code flags are used only during assembly phase */       \
   /* for tier4 AOT compilation and they are ignored in other phases */      \
                                                                             \

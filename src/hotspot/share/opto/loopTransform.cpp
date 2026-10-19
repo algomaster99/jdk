@@ -1150,8 +1150,9 @@ bool IdealLoopTree::policy_maximally_unroll(PhaseIdealLoop* phase) const {
   assert(!phase->exceeding_node_budget(), "sanity");
 
   // Allow the unrolled body to get larger than the standard loop size limit.
-  uint unroll_limit = (uint)LoopUnrollLimit * 4;
-  assert((intx)unroll_limit == LoopUnrollLimit * 4, "LoopUnrollLimit must fit in 32bits");
+  const intx loop_unroll_limit = phase->C->directive()->LoopUnrollLimitOption;
+  uint unroll_limit = (uint)loop_unroll_limit * 4;
+  assert((intx)unroll_limit == loop_unroll_limit * 4, "LoopUnrollLimit must fit in 32bits");
   if (trip_count > unroll_limit || _body.size() > unroll_limit) {
     return false;
   }
@@ -1217,7 +1218,9 @@ bool IdealLoopTree::policy_unroll(PhaseIdealLoop *phase) {
   if (cl->trip_count() <= (cl->is_normal_loop() ? 2u : 1u)) {
     return false;
   }
-  _local_loop_unroll_limit  = LoopUnrollLimit;
+  // Per-method override via CompileCommand or compiler directive (see AIJitAgent).
+  const intx loop_unroll_limit = phase->C->directive()->LoopUnrollLimitOption;
+  _local_loop_unroll_limit  = loop_unroll_limit;
   _local_loop_unroll_factor = 4;
   int future_unroll_cnt = cl->unrolled_count() * 2;
   if (!cl->is_vectorized_loop()) {
@@ -1383,7 +1386,7 @@ bool IdealLoopTree::policy_unroll(PhaseIdealLoop *phase) {
 
   // Check for being too big
   if (body_size > (uint)_local_loop_unroll_limit) {
-    if ((cl->is_subword_loop() || xors_in_loop >= 4) && body_size < 4u * LoopUnrollLimit) {
+    if ((cl->is_subword_loop() || xors_in_loop >= 4) && body_size < 4u * loop_unroll_limit) {
       return should_unroll && phase->may_require_nodes(estimate);
     }
     return false; // Loop too big.
@@ -1420,7 +1423,7 @@ void IdealLoopTree::policy_unroll_slp_analysis(CountedLoopNode *cl, PhaseIdealLo
       int slp_max_unroll_factor = cl->slp_max_unroll();
       if (slp_max_unroll_factor >= future_unroll_cnt) {
         int new_limit = cl->node_count_before_unroll() * slp_max_unroll_factor;
-        if (new_limit > LoopUnrollLimit) {
+        if (new_limit > phase->C->directive()->LoopUnrollLimitOption) {
           if (TraceSuperWordLoopUnrollAnalysis) {
             tty->print_cr("slp analysis unroll=%d, default limit=%d\n", new_limit, _local_loop_unroll_limit);
           }

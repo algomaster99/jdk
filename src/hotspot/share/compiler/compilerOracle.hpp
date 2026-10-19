@@ -95,6 +95,7 @@ NOT_PRODUCT(option(TraceMergeStores, "TraceMergeStores", Ccstrlist)) \
   option(CloneMapDebug, "CloneMapDebug", Bool) \
   option(IncrementalInlineForceCleanup, "IncrementalInlineForceCleanup", Bool) \
   option(MaxNodeLimit, "MaxNodeLimit", Intx)  \
+  option(LoopUnrollLimit, "LoopUnrollLimit", Intx)  \
   option(DontAOTCompile, "DontAOTCompile", Bool) \
   option(DontPreload, "DontPreload", Bool) \
   option(IgnoreAOTCompiled, "IgnoreAOTCompiled", Bool) \

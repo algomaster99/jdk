@@ -66,6 +66,7 @@ class CompileTask : public CHeapObj<mtCompiler> {
       Reason_AOTPreload,       // "virtual compilation" - copy in "preload" AOT code
       Reason_AOTCompile,       // create normal AOT code (assembly phase only)
       Reason_AOTCompileForPreload, // create "preload" AOT code (assembly phase only)
+      Reason_AIJit,            // recompilation requested by AIJitAgentThread
       Reason_Count
   };
 
@@ -82,6 +83,7 @@ class CompileTask : public CHeapObj<mtCompiler> {
       "aot_preload",
       "aot_compile",
       "aot_compile_for_preload",
+      "aijit",
     };
     static_assert(ARRAY_SIZE(reason_names) == Reason_Count);
     return reason_names[compile_reason];
